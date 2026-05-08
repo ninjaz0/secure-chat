@@ -4,9 +4,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use rusqlite::{params, Connection};
 use secure_chat_core::{
-    AccountId, DeviceId, DevicePreKeyBundle, DrainReceiptsResponse, DrainResponse, QueuedMessage,
-    QueuedReceipt, ReceiptKind, ReceiptRequest, RegisterRequest, RegisterResponse, RelayCommand,
-    RelayCommandResponse, SendRequest, RELAY_QUIC_ALPN,
+    verify_relay_auth_for_request, AccountId, DeviceId, DevicePreKeyBundle, DrainReceiptsResponse,
+    DrainRequest, DrainResponse, QueuedMessage, QueuedReceipt, ReceiptKind, ReceiptRequest,
+    RegisterRequest, RegisterResponse, RelayAuth, RelayCommand, RelayCommandResponse, SendRequest,
+    RELAY_QUIC_ALPN,
 };
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -31,6 +32,13 @@ struct RelayState {
     devices: HashMap<AccountId, HashMap<DeviceId, DevicePreKeyBundle>>,
     queues: HashMap<DeviceId, VecDeque<QueuedMessage>>,
     receipts: HashMap<DeviceId, VecDeque<QueuedReceipt>>,
+    auth_nonces: HashMap<DeviceId, VecDeque<AuthNonceRecord>>,
+}
+
+#[derive(Clone)]
+struct AuthNonceRecord {
+    issued_unix: u64,
+    nonce: [u8; 16],
 }
 
 impl AppState {
@@ -62,9 +70,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/accounts", post(register_device))
         .route("/v1/accounts/:account_id/devices", get(list_devices))
         .route("/v1/messages", post(send_message))
-        .route("/v1/messages/:account_id/:device_id", get(drain_messages))
+        .route("/v1/messages/drain", post(drain_messages))
         .route("/v1/receipts", post(send_receipt))
-        .route("/v1/receipts/:account_id/:device_id", get(drain_receipts))
+        .route("/v1/receipts/drain", post(drain_receipts))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -165,20 +173,18 @@ pub async fn handle_command(state: AppState, command: RelayCommand) -> RelayComm
             Ok(message) => RelayCommandResponse::SendMessage(message),
             Err(status) => error_response(status, "send message failed"),
         },
-        RelayCommand::DrainMessages {
-            account_id,
-            device_id,
-        } => RelayCommandResponse::DrainMessages(
-            drain_messages_inner(&state, account_id, device_id).await,
-        ),
+        RelayCommand::DrainMessages(request) => match drain_messages_inner(&state, request).await {
+            Ok(response) => RelayCommandResponse::DrainMessages(response),
+            Err(status) => error_response(status, "drain messages failed"),
+        },
         RelayCommand::SendReceipt(request) => match send_receipt_inner(&state, request).await {
             Ok(receipt) => RelayCommandResponse::SendReceipt(receipt),
             Err(status) => error_response(status, "send receipt failed"),
         },
-        RelayCommand::DrainReceipts {
-            account_id: _,
-            device_id,
-        } => RelayCommandResponse::DrainReceipts(drain_receipts_inner(&state, device_id).await),
+        RelayCommand::DrainReceipts(request) => match drain_receipts_inner(&state, request).await {
+            Ok(response) => RelayCommandResponse::DrainReceipts(response),
+            Err(status) => error_response(status, "drain receipts failed"),
+        },
     }
 }
 
@@ -193,6 +199,7 @@ fn health_value() -> serde_json::Value {
         "stores_plaintext": false,
         "transports": ["http", "https", "quic"],
         "receipts": ["delivered", "read"],
+        "device_auth": "ed25519_request_signatures",
     })
 }
 
@@ -213,6 +220,20 @@ async fn register_device_inner(
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     let account_id = request.bundle.identity.account_id;
     let device_id = request.bundle.identity.device_id;
+    {
+        let mut inner = state.inner.write().await;
+        let mut signed_request = request.clone();
+        signed_request.auth = None;
+        verify_relay_auth(
+            &mut inner,
+            account_id,
+            device_id,
+            &request.bundle.identity.device_signing_public,
+            "register_device",
+            &signed_request,
+            request.auth.as_ref(),
+        )?;
+    }
     persist_device(state.db_path(), account_id, device_id, &request.bundle).map_err(|err| {
         tracing::error!(%err, "persist device failed");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -265,6 +286,21 @@ async fn send_message_inner(
     request: SendRequest,
 ) -> Result<QueuedMessage, StatusCode> {
     let mut inner = state.inner.write().await;
+    let sender_account_id = request.sender_account_id.ok_or(StatusCode::UNAUTHORIZED)?;
+    let sender_device_id = request.sender_device_id.ok_or(StatusCode::UNAUTHORIZED)?;
+    let mut signed_request = request.clone();
+    signed_request.auth = None;
+    let sender_public = device_signing_public(&inner, sender_account_id, sender_device_id)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    verify_relay_auth(
+        &mut inner,
+        sender_account_id,
+        sender_device_id,
+        &sender_public,
+        "send_message",
+        &signed_request,
+        request.auth.as_ref(),
+    )?;
     let exists = inner
         .devices
         .get(&request.to_account_id)
@@ -275,8 +311,8 @@ async fn send_message_inner(
     }
     let message = QueuedMessage {
         id: Uuid::new_v4(),
-        sender_account_id: request.sender_account_id,
-        sender_device_id: request.sender_device_id,
+        sender_account_id: Some(sender_account_id),
+        sender_device_id: Some(sender_device_id),
         transport_kind: request.transport_kind,
         sealed_sender: request.sealed_sender,
         ciphertext: request.ciphertext,
@@ -297,21 +333,31 @@ async fn send_message_inner(
 
 async fn drain_messages(
     State(state): State<AppState>,
-    AxumPath((_account_id, device_id)): AxumPath<(AccountId, DeviceId)>,
+    Json(request): Json<DrainRequest>,
 ) -> Result<Json<DrainResponse>, StatusCode> {
-    Ok(Json(
-        drain_messages_inner(&state, _account_id, device_id).await,
-    ))
+    drain_messages_inner(&state, request).await.map(Json)
 }
 
 async fn drain_messages_inner(
     state: &AppState,
-    account_id: AccountId,
-    device_id: DeviceId,
-) -> DrainResponse {
+    request: DrainRequest,
+) -> Result<DrainResponse, StatusCode> {
     let mut inner = state.inner.write().await;
+    let mut signed_request = request.clone();
+    signed_request.auth = None;
+    let device_public = device_signing_public(&inner, request.account_id, request.device_id)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    verify_relay_auth(
+        &mut inner,
+        request.account_id,
+        request.device_id,
+        &device_public,
+        "drain_messages",
+        &signed_request,
+        request.auth.as_ref(),
+    )?;
     let now = now_unix();
-    let queue = inner.queues.entry(device_id).or_default();
+    let queue = inner.queues.entry(request.device_id).or_default();
     let mut messages = Vec::new();
     let mut delivery_receipts = Vec::new();
     let mut drained_message_ids = Vec::new();
@@ -327,8 +373,8 @@ async fn drain_messages_inner(
                     QueuedReceipt {
                         id: Uuid::new_v4(),
                         message_id: message.id,
-                        from_account_id: account_id,
-                        from_device_id: device_id,
+                        from_account_id: request.account_id,
+                        from_device_id: request.device_id,
                         kind: ReceiptKind::Delivered,
                         at_unix: now,
                     },
@@ -355,7 +401,7 @@ async fn drain_messages_inner(
             tracing::error!(%err, "delete drained message failed");
         }
     }
-    DrainResponse { messages }
+    Ok(DrainResponse { messages })
 }
 
 async fn send_receipt(
@@ -370,6 +416,20 @@ async fn send_receipt_inner(
     request: ReceiptRequest,
 ) -> Result<QueuedReceipt, StatusCode> {
     let mut inner = state.inner.write().await;
+    let mut signed_request = request.clone();
+    signed_request.auth = None;
+    let sender_public =
+        device_signing_public(&inner, request.from_account_id, request.from_device_id)
+            .ok_or(StatusCode::UNAUTHORIZED)?;
+    verify_relay_auth(
+        &mut inner,
+        request.from_account_id,
+        request.from_device_id,
+        &sender_public,
+        "send_receipt",
+        &signed_request,
+        request.auth.as_ref(),
+    )?;
     let exists = inner
         .devices
         .get(&request.to_account_id)
@@ -400,14 +460,30 @@ async fn send_receipt_inner(
 
 async fn drain_receipts(
     State(state): State<AppState>,
-    AxumPath((_account_id, device_id)): AxumPath<(AccountId, DeviceId)>,
-) -> Json<DrainReceiptsResponse> {
-    Json(drain_receipts_inner(&state, device_id).await)
+    Json(request): Json<DrainRequest>,
+) -> Result<Json<DrainReceiptsResponse>, StatusCode> {
+    drain_receipts_inner(&state, request).await.map(Json)
 }
 
-async fn drain_receipts_inner(state: &AppState, device_id: DeviceId) -> DrainReceiptsResponse {
+async fn drain_receipts_inner(
+    state: &AppState,
+    request: DrainRequest,
+) -> Result<DrainReceiptsResponse, StatusCode> {
     let mut inner = state.inner.write().await;
-    let queue = inner.receipts.entry(device_id).or_default();
+    let mut signed_request = request.clone();
+    signed_request.auth = None;
+    let device_public = device_signing_public(&inner, request.account_id, request.device_id)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    verify_relay_auth(
+        &mut inner,
+        request.account_id,
+        request.device_id,
+        &device_public,
+        "drain_receipts",
+        &signed_request,
+        request.auth.as_ref(),
+    )?;
+    let queue = inner.receipts.entry(request.device_id).or_default();
     let mut receipts = Vec::new();
     let mut receipt_ids = Vec::new();
     while let Some(receipt) = queue.pop_front() {
@@ -419,7 +495,47 @@ async fn drain_receipts_inner(state: &AppState, device_id: DeviceId) -> DrainRec
             tracing::error!(%err, "delete drained receipt failed");
         }
     }
-    DrainReceiptsResponse { receipts }
+    Ok(DrainReceiptsResponse { receipts })
+}
+
+fn device_signing_public(
+    inner: &RelayState,
+    account_id: AccountId,
+    device_id: DeviceId,
+) -> Option<[u8; 32]> {
+    inner
+        .devices
+        .get(&account_id)
+        .and_then(|devices| devices.get(&device_id))
+        .map(|bundle| bundle.identity.device_signing_public)
+}
+
+fn verify_relay_auth<T: serde::Serialize>(
+    inner: &mut RelayState,
+    account_id: AccountId,
+    device_id: DeviceId,
+    device_signing_public: &[u8; 32],
+    action: &str,
+    unsigned_request: &T,
+    auth: Option<&RelayAuth>,
+) -> Result<(), StatusCode> {
+    let auth = auth.ok_or(StatusCode::UNAUTHORIZED)?;
+    if auth.account_id != account_id || auth.device_id != device_id {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let now = now_unix();
+    verify_relay_auth_for_request(device_signing_public, action, unsigned_request, auth, now)
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let nonces = inner.auth_nonces.entry(device_id).or_default();
+    nonces.retain(|record| record.issued_unix + secure_chat_core::RELAY_AUTH_MAX_SKEW_SECS >= now);
+    if nonces.iter().any(|record| record.nonce == auth.nonce) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    nonces.push_back(AuthNonceRecord {
+        issued_unix: auth.issued_unix,
+        nonce: auth.nonce,
+    });
+    Ok(())
 }
 
 fn now_unix() -> u64 {
@@ -697,29 +813,44 @@ mod tests {
         let bundle = keys.pre_key_bundle();
 
         let state = AppState::persistent(&db_path).unwrap();
-        register_device_inner(
-            &state,
-            RegisterRequest {
-                bundle: bundle.clone(),
-            },
-        )
-        .await
-        .unwrap();
-        let message = send_message_inner(
-            &state,
-            SendRequest {
-                sender_account_id: Some(keys.account_id),
-                sender_device_id: Some(keys.device_id),
-                to_account_id: keys.account_id,
-                to_device_id: keys.device_id,
-                transport_kind: TransportKind::RelayHttps,
-                sealed_sender: None,
-                ciphertext: b"ciphertext".to_vec(),
-                expires_unix: None,
-            },
-        )
-        .await
-        .unwrap();
+        let mut register_request = RegisterRequest {
+            bundle: bundle.clone(),
+            auth: None,
+        };
+        register_request.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                &keys,
+                "register_device",
+                &register_request,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        register_device_inner(&state, register_request)
+            .await
+            .unwrap();
+
+        let mut send_request = SendRequest {
+            sender_account_id: Some(keys.account_id),
+            sender_device_id: Some(keys.device_id),
+            to_account_id: keys.account_id,
+            to_device_id: keys.device_id,
+            transport_kind: TransportKind::RelayHttps,
+            sealed_sender: None,
+            ciphertext: b"ciphertext".to_vec(),
+            expires_unix: None,
+            auth: None,
+        };
+        send_request.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                &keys,
+                "send_message",
+                &send_request,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        let message = send_message_inner(&state, send_request).await.unwrap();
 
         let restarted = AppState::persistent(&db_path).unwrap();
         let devices = list_devices_inner(&restarted, keys.account_id)
@@ -727,29 +858,95 @@ mod tests {
             .unwrap();
         assert_eq!(devices, vec![bundle]);
 
-        let drained = drain_messages_inner(&restarted, keys.account_id, keys.device_id).await;
+        let drained = drain_messages_inner(&restarted, signed_drain(&keys, "drain_messages"))
+            .await
+            .unwrap();
         assert_eq!(drained.messages.len(), 1);
         assert_eq!(drained.messages[0].id, message.id);
 
         let restarted = AppState::persistent(&db_path).unwrap();
         assert!(
-            drain_messages_inner(&restarted, keys.account_id, keys.device_id)
+            drain_messages_inner(&restarted, signed_drain(&keys, "drain_messages"))
                 .await
+                .unwrap()
                 .messages
                 .is_empty()
         );
 
-        let receipts = drain_receipts_inner(&restarted, keys.device_id).await;
+        let receipts = drain_receipts_inner(&restarted, signed_drain(&keys, "drain_receipts"))
+            .await
+            .unwrap();
         assert_eq!(receipts.receipts.len(), 1);
         assert_eq!(receipts.receipts[0].message_id, message.id);
         assert_eq!(receipts.receipts[0].kind, ReceiptKind::Delivered);
 
         let restarted = AppState::persistent(&db_path).unwrap();
-        assert!(drain_receipts_inner(&restarted, keys.device_id)
-            .await
-            .receipts
-            .is_empty());
+        assert!(
+            drain_receipts_inner(&restarted, signed_drain(&keys, "drain_receipts"))
+                .await
+                .unwrap()
+                .receipts
+                .is_empty()
+        );
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn relay_rejects_unsigned_and_replayed_device_requests() {
+        let keys = DeviceKeyMaterial::generate(1);
+        let state = AppState::memory();
+        let mut register_request = RegisterRequest {
+            bundle: keys.pre_key_bundle(),
+            auth: None,
+        };
+        register_request.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                &keys,
+                "register_device",
+                &register_request,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        register_device_inner(&state, register_request)
+            .await
+            .unwrap();
+
+        let unsigned = SendRequest {
+            sender_account_id: Some(keys.account_id),
+            sender_device_id: Some(keys.device_id),
+            to_account_id: keys.account_id,
+            to_device_id: keys.device_id,
+            transport_kind: TransportKind::RelayHttps,
+            sealed_sender: None,
+            ciphertext: b"ciphertext".to_vec(),
+            expires_unix: None,
+            auth: None,
+        };
+        assert_eq!(
+            send_message_inner(&state, unsigned).await.unwrap_err(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let drain = signed_drain(&keys, "drain_messages");
+        drain_messages_inner(&state, drain.clone()).await.unwrap();
+        assert_eq!(
+            drain_messages_inner(&state, drain).await.unwrap_err(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    fn signed_drain(keys: &DeviceKeyMaterial, action: &str) -> DrainRequest {
+        let mut request = DrainRequest {
+            account_id: keys.account_id,
+            device_id: keys.device_id,
+            auth: None,
+        };
+        request.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(keys, action, &request, now_unix())
+                .unwrap(),
+        );
+        request
     }
 }

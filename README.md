@@ -9,6 +9,8 @@ It includes:
 - anonymous accounts, per-device identity keys, invite links, and safety numbers
 - ChaCha20-Poly1305 message encryption by default, with an AES-256-GCM suite enum
 - HTTPS and QUIC relay transports with a shared encrypted-frame API
+- Ed25519-signed relay requests for device registration, send, drain, and read
+  receipt commands
 - SQLite relay persistence for public pre-key bundles, offline ciphertext queues,
   and delivery/read receipts
 - macOS Keychain storage for identity keys and a local storage key
@@ -80,7 +82,9 @@ For server deployment, use [docs/deploy-relay.md](docs/deploy-relay.md).
    updates sent/delivered/read states from relay receipts.
 
 The relay receives only public pre-key bundles, opaque ciphertext frames, and
-delivery/read receipts. Plaintext stays inside the endpoint runtimes.
+delivery/read receipts. Private relay operations are signed by the owning
+device, so another client cannot drain a queue just by guessing a device ID.
+Plaintext stays inside the endpoint runtimes.
 
 ## Architecture
 
@@ -115,6 +119,9 @@ delivery/read receipts. Plaintext stays inside the endpoint runtimes.
   account/device public-key digests.
 - Transport: HTTPS and QUIC carry the same E2EE ciphertext envelopes. The core
   also supports fixed-size padding, jitter profiles, and cover-traffic flags.
+- Relay API auth: device Ed25519 signatures bind action, request digest,
+  timestamp, nonce, account ID, and device ID; the relay rejects unsigned,
+  stale, and replayed private commands.
 
 ## Current Limits
 

@@ -1,8 +1,8 @@
 use secure_chat_core::{
     accept_session_as_responder, start_session_as_initiator, AccountId, CipherSuite, CryptoError,
-    DeviceId, DeviceKeyMaterial, DevicePreKeyBundle, DrainReceiptsResponse, DrainResponse,
-    InitialMessage, Invite, ObfuscationProfile, PlainMessage, QueuedMessage, QueuedReceipt,
-    RatchetSession, ReceiptRequest, RegisterRequest, RegisterResponse, RelayCommand,
+    DeviceId, DeviceKeyMaterial, DevicePreKeyBundle, DrainReceiptsResponse, DrainRequest,
+    DrainResponse, InitialMessage, Invite, ObfuscationProfile, PlainMessage, QueuedMessage,
+    QueuedReceipt, RatchetSession, ReceiptRequest, RegisterRequest, RegisterResponse, RelayCommand,
     RelayCommandResponse, SendRequest, TransportFrame, TransportKind, WireMessage, RELAY_QUIC_ALPN,
 };
 use serde::{Deserialize, Serialize};
@@ -65,12 +65,13 @@ impl RelayClient {
 
     pub async fn register_device(
         &self,
-        bundle: DevicePreKeyBundle,
+        keys: &DeviceKeyMaterial,
     ) -> Result<RegisterResponse, ClientError> {
+        let request = signed_register_request(keys)?;
         match &self.transport {
-            RelayTransport::Http(client) => client.register_device(bundle).await,
+            RelayTransport::Http(client) => client.register_device(request).await,
             RelayTransport::Quic(client) => match client
-                .command(RelayCommand::RegisterDevice(RegisterRequest { bundle }))
+                .command(RelayCommand::RegisterDevice(request))
                 .await?
             {
                 RelayCommandResponse::RegisterDevice(response) => Ok(response),
@@ -97,7 +98,12 @@ impl RelayClient {
         }
     }
 
-    pub async fn send(&self, request: SendRequest) -> Result<QueuedMessage, ClientError> {
+    pub async fn send(
+        &self,
+        keys: &DeviceKeyMaterial,
+        request: SendRequest,
+    ) -> Result<QueuedMessage, ClientError> {
+        let request = signed_send_request(keys, request)?;
         match &self.transport {
             RelayTransport::Http(client) => client.send(request).await,
             RelayTransport::Quic(client) => {
@@ -111,8 +117,10 @@ impl RelayClient {
 
     pub async fn send_receipt(
         &self,
+        keys: &DeviceKeyMaterial,
         request: ReceiptRequest,
     ) -> Result<QueuedReceipt, ClientError> {
+        let request = signed_receipt_request(keys, request)?;
         match &self.transport {
             RelayTransport::Http(client) => client.send_receipt(request).await,
             RelayTransport::Quic(client) => {
@@ -124,43 +132,32 @@ impl RelayClient {
         }
     }
 
-    pub async fn drain(
-        &self,
-        account_id: AccountId,
-        device_id: DeviceId,
-    ) -> Result<Vec<QueuedMessage>, ClientError> {
+    pub async fn drain(&self, keys: &DeviceKeyMaterial) -> Result<Vec<QueuedMessage>, ClientError> {
+        let request = signed_drain_request(keys, "drain_messages")?;
         match &self.transport {
-            RelayTransport::Http(client) => client.drain(account_id, device_id).await,
-            RelayTransport::Quic(client) => match client
-                .command(RelayCommand::DrainMessages {
-                    account_id,
-                    device_id,
-                })
-                .await?
-            {
-                RelayCommandResponse::DrainMessages(response) => Ok(response.messages),
-                response => Err(unexpected_response(response)),
-            },
+            RelayTransport::Http(client) => client.drain(request).await,
+            RelayTransport::Quic(client) => {
+                match client.command(RelayCommand::DrainMessages(request)).await? {
+                    RelayCommandResponse::DrainMessages(response) => Ok(response.messages),
+                    response => Err(unexpected_response(response)),
+                }
+            }
         }
     }
 
     pub async fn drain_receipts(
         &self,
-        account_id: AccountId,
-        device_id: DeviceId,
+        keys: &DeviceKeyMaterial,
     ) -> Result<Vec<QueuedReceipt>, ClientError> {
+        let request = signed_drain_request(keys, "drain_receipts")?;
         match &self.transport {
-            RelayTransport::Http(client) => client.drain_receipts(account_id, device_id).await,
-            RelayTransport::Quic(client) => match client
-                .command(RelayCommand::DrainReceipts {
-                    account_id,
-                    device_id,
-                })
-                .await?
-            {
-                RelayCommandResponse::DrainReceipts(response) => Ok(response.receipts),
-                response => Err(unexpected_response(response)),
-            },
+            RelayTransport::Http(client) => client.drain_receipts(request).await,
+            RelayTransport::Quic(client) => {
+                match client.command(RelayCommand::DrainReceipts(request)).await? {
+                    RelayCommandResponse::DrainReceipts(response) => Ok(response.receipts),
+                    response => Err(unexpected_response(response)),
+                }
+            }
         }
     }
 }
@@ -192,12 +189,12 @@ impl RelayHttpClient {
 
     pub async fn register_device(
         &self,
-        bundle: DevicePreKeyBundle,
+        request: RegisterRequest,
     ) -> Result<RegisterResponse, ClientError> {
         Ok(self
             .http
             .post(self.url("/v1/accounts"))
-            .json(&RegisterRequest { bundle })
+            .json(&request)
             .send()
             .await?
             .error_for_status()?
@@ -246,14 +243,11 @@ impl RelayHttpClient {
             .await?)
     }
 
-    pub async fn drain(
-        &self,
-        account_id: AccountId,
-        device_id: DeviceId,
-    ) -> Result<Vec<QueuedMessage>, ClientError> {
+    pub async fn drain(&self, request: DrainRequest) -> Result<Vec<QueuedMessage>, ClientError> {
         let response: DrainResponse = self
             .http
-            .get(self.url(&format!("/v1/messages/{account_id}/{device_id}")))
+            .post(self.url("/v1/messages/drain"))
+            .json(&request)
             .send()
             .await?
             .error_for_status()?
@@ -264,12 +258,12 @@ impl RelayHttpClient {
 
     pub async fn drain_receipts(
         &self,
-        account_id: AccountId,
-        device_id: DeviceId,
+        request: DrainRequest,
     ) -> Result<Vec<QueuedReceipt>, ClientError> {
         let response: DrainReceiptsResponse = self
             .http
-            .get(self.url(&format!("/v1/receipts/{account_id}/{device_id}")))
+            .post(self.url("/v1/receipts/drain"))
+            .json(&request)
             .send()
             .await?
             .error_for_status()?
@@ -393,7 +387,7 @@ impl SecureChatDevice {
     }
 
     pub async fn register(&self) -> Result<RegisterResponse, ClientError> {
-        self.relay.register_device(self.keys.pre_key_bundle()).await
+        self.relay.register_device(&self.keys).await
     }
 
     pub async fn send_to_invite(
@@ -425,10 +419,7 @@ impl SecureChatDevice {
     }
 
     pub async fn drain_plaintexts(&mut self) -> Result<Vec<DecryptedDelivery>, ClientError> {
-        let queued = self
-            .relay
-            .drain(self.account_id(), self.device_id())
-            .await?;
+        let queued = self.relay.drain(&self.keys).await?;
         let mut decrypted = Vec::new();
         for item in queued {
             let frame: TransportFrame = serde_json::from_slice(&item.ciphertext)?;
@@ -480,16 +471,20 @@ impl SecureChatDevice {
         let payload = serde_json::to_vec(&envelope)?;
         let frame = TransportFrame::protect(&payload, &padding_profile(payload.len()))?;
         self.relay
-            .send(SendRequest {
-                sender_account_id: Some(self.keys.account_id),
-                sender_device_id: Some(self.keys.device_id),
-                to_account_id,
-                to_device_id,
-                transport_kind: TransportKind::WebSocketTls,
-                sealed_sender: None,
-                ciphertext: serde_json::to_vec(&frame)?,
-                expires_unix: Some(now_unix() + 7 * 24 * 60 * 60),
-            })
+            .send(
+                &self.keys,
+                SendRequest {
+                    sender_account_id: Some(self.keys.account_id),
+                    sender_device_id: Some(self.keys.device_id),
+                    to_account_id,
+                    to_device_id,
+                    transport_kind: TransportKind::WebSocketTls,
+                    sealed_sender: None,
+                    ciphertext: serde_json::to_vec(&frame)?,
+                    expires_unix: Some(now_unix() + 7 * 24 * 60 * 60),
+                    auth: None,
+                },
+            )
             .await
     }
 }
@@ -505,6 +500,66 @@ fn padding_profile(payload_len: usize) -> ObfuscationProfile {
     let mut profile = ObfuscationProfile::websocket_fallback();
     profile.fixed_frame_size = padded_bucket(payload_len);
     profile
+}
+
+fn signed_register_request(keys: &DeviceKeyMaterial) -> Result<RegisterRequest, ClientError> {
+    let mut request = RegisterRequest {
+        bundle: keys.pre_key_bundle(),
+        auth: None,
+    };
+    request.auth = Some(secure_chat_core::sign_relay_auth_for_request(
+        keys,
+        "register_device",
+        &request,
+        now_unix(),
+    )?);
+    Ok(request)
+}
+
+fn signed_send_request(
+    keys: &DeviceKeyMaterial,
+    mut request: SendRequest,
+) -> Result<SendRequest, ClientError> {
+    request.auth = None;
+    request.auth = Some(secure_chat_core::sign_relay_auth_for_request(
+        keys,
+        "send_message",
+        &request,
+        now_unix(),
+    )?);
+    Ok(request)
+}
+
+fn signed_receipt_request(
+    keys: &DeviceKeyMaterial,
+    mut request: ReceiptRequest,
+) -> Result<ReceiptRequest, ClientError> {
+    request.auth = None;
+    request.auth = Some(secure_chat_core::sign_relay_auth_for_request(
+        keys,
+        "send_receipt",
+        &request,
+        now_unix(),
+    )?);
+    Ok(request)
+}
+
+fn signed_drain_request(
+    keys: &DeviceKeyMaterial,
+    action: &str,
+) -> Result<DrainRequest, ClientError> {
+    let mut request = DrainRequest {
+        account_id: keys.account_id,
+        device_id: keys.device_id,
+        auth: None,
+    };
+    request.auth = Some(secure_chat_core::sign_relay_auth_for_request(
+        keys,
+        action,
+        &request,
+        now_unix(),
+    )?);
+    Ok(request)
 }
 
 fn padded_bucket(payload_len: usize) -> usize {

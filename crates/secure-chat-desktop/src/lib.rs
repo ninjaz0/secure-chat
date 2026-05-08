@@ -270,7 +270,7 @@ impl DesktopRuntime {
             .contact(contact_id)?
             .ok_or(DesktopError::ContactNotFound)?;
         let relay = RelayClient::new(profile.relay_url);
-        relay.register_device(keys.pre_key_bundle()).await?;
+        relay.register_device(&keys).await?;
 
         let mut session = runtime.load_session(contact_id)?;
         let initial = if session.is_some() {
@@ -294,16 +294,20 @@ impl DesktopRuntime {
         let frame = TransportFrame::protect(&payload, &padding_profile(payload.len()))?;
         let relay_ciphertext = serde_json::to_vec(&frame)?;
         relay
-            .send(SendRequest {
-                sender_account_id: Some(keys.account_id),
-                sender_device_id: Some(keys.device_id),
-                to_account_id: session.remote_identity.account_id,
-                to_device_id: session.remote_identity.device_id,
-                transport_kind: TransportKind::WebSocketTls,
-                sealed_sender: None,
-                ciphertext: relay_ciphertext.clone(),
-                expires_unix: Some(now_unix() + 7 * 24 * 60 * 60),
-            })
+            .send(
+                &keys,
+                SendRequest {
+                    sender_account_id: Some(keys.account_id),
+                    sender_device_id: Some(keys.device_id),
+                    to_account_id: session.remote_identity.account_id,
+                    to_device_id: session.remote_identity.device_id,
+                    transport_kind: TransportKind::WebSocketTls,
+                    sealed_sender: None,
+                    ciphertext: relay_ciphertext.clone(),
+                    expires_unix: Some(now_unix() + 7 * 24 * 60 * 60),
+                    auth: None,
+                },
+            )
             .await
             .map(|sent| {
                 runtime
@@ -328,13 +332,9 @@ impl DesktopRuntime {
         let keys = runtime.load_device_keys()?;
         let storage_key = runtime.load_storage_key()?;
         let relay = RelayClient::new(&profile.relay_url);
-        relay.register_device(keys.pre_key_bundle()).await?;
-        runtime.apply_receipts(
-            relay
-                .drain_receipts(keys.account_id, keys.device_id)
-                .await?,
-        )?;
-        let queued = relay.drain(keys.account_id, keys.device_id).await?;
+        relay.register_device(&keys).await?;
+        runtime.apply_receipts(relay.drain_receipts(&keys).await?)?;
+        let queued = relay.drain(&keys).await?;
         let mut received_count = 0usize;
 
         for item in queued {
@@ -370,15 +370,19 @@ impl DesktopRuntime {
                 (item.sender_account_id, item.sender_device_id)
             {
                 let _ = relay
-                    .send_receipt(ReceiptRequest {
-                        message_id: item.id,
-                        from_account_id: keys.account_id,
-                        from_device_id: keys.device_id,
-                        to_account_id: sender_account_id,
-                        to_device_id: sender_device_id,
-                        kind: ReceiptKind::Read,
-                        at_unix: now_unix(),
-                    })
+                    .send_receipt(
+                        &keys,
+                        ReceiptRequest {
+                            message_id: item.id,
+                            from_account_id: keys.account_id,
+                            from_device_id: keys.device_id,
+                            to_account_id: sender_account_id,
+                            to_device_id: sender_device_id,
+                            kind: ReceiptKind::Read,
+                            at_unix: now_unix(),
+                            auth: None,
+                        },
+                    )
                     .await;
             }
             received_count += 1;
@@ -417,7 +421,7 @@ impl DesktopRuntime {
         let profile = self.ensure_profile()?;
         let keys = self.load_device_keys()?;
         RelayClient::new(profile.relay_url)
-            .register_device(keys.pre_key_bundle())
+            .register_device(&keys)
             .await?;
         Ok(())
     }

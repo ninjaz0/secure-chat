@@ -4,7 +4,8 @@ This guide deploys one SecureChat relay with HTTPS, QUIC, SQLite persistence,
 systemd supervision, and Let's Encrypt TLS certificates.
 
 The relay still never sees plaintext or E2EE session keys. It stores public
-pre-key bundles, opaque ciphertext queues, and delivery/read receipts.
+pre-key bundles, opaque ciphertext queues, and delivery/read receipts. Private
+relay operations are authenticated with per-device Ed25519 request signatures.
 
 ## Server Requirements
 
@@ -189,3 +190,6 @@ sudo systemctl restart secure-chat-relay
 - The relay stores ciphertext metadata needed for delivery. It does not store
   message bodies in plaintext, session keys, local device identity keys, or
   decrypted contact data.
+- Device registration, send, drain, and receipt commands must be signed by the
+  device key. Public pre-key lookup remains open by design for invite-based
+  asynchronous session setup.

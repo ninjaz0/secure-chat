@@ -16,9 +16,10 @@ pub use protocol::{
     RatchetSession, WireMessage, MAX_SKIP,
 };
 pub use relay_api::{
-    DrainReceiptsResponse, DrainResponse, QueuedMessage, QueuedReceipt, ReceiptKind,
-    ReceiptRequest, RegisterRequest, RegisterResponse, RelayCommand, RelayCommandResponse,
-    SendRequest, RELAY_QUIC_ALPN,
+    sign_relay_auth_for_request, verify_relay_auth_for_request, DrainReceiptsResponse,
+    DrainRequest, DrainResponse, QueuedMessage, QueuedReceipt, ReceiptKind, ReceiptRequest,
+    RegisterRequest, RegisterResponse, RelayAuth, RelayCommand, RelayCommandResponse, SendRequest,
+    RELAY_AUTH_MAX_SKEW_SECS, RELAY_QUIC_ALPN,
 };
 pub use safety::{safety_number, SafetyFingerprint};
 pub use transport::{ObfuscationProfile, TransportFrame, TransportKind};

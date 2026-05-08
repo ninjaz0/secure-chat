@@ -114,6 +114,24 @@ The client SDK uses the relay as an opaque delivery queue:
 The relay does not parse the E2EE envelope, protected header, plaintext, or
 ratchet state.
 
+## Relay Device Authentication
+
+Mutating and private relay commands are authenticated with per-device Ed25519
+request signatures:
+
+- device registration signs the registration body with the registering device
+  signing key from the pre-key bundle
+- message send signs the send body with the sender device signing key
+- message and receipt drains sign the drain body with the receiving device
+  signing key
+- read receipt send signs the receipt body with the reader device signing key
+
+The signed payload binds the action name, canonical request digest, account ID,
+device ID, issued timestamp, and a 128-bit nonce. The relay enforces a five
+minute timestamp skew window and keeps an in-memory nonce replay cache per
+device. Public pre-key lookup remains unauthenticated so invite-based session
+setup can fetch recipient bundles.
+
 ## Relay Persistence
 
 The production relay can run with `SECURE_CHAT_RELAY_DB=/path/to/relay.sqlite3`.
