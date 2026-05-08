@@ -10,7 +10,7 @@ chat.example.com
 
 ## 你需要准备什么
 
-- 两台 macOS 电脑，或同一台电脑运行两个不同数据目录的客户端
+- 两台客户端设备：macOS 或 iOS 都可以混用
 - 一个可访问的 relay：
   - QUIC URL：`quic://chat.example.com:443`
   - HTTPS URL：`https://chat.example.com`
@@ -32,6 +32,15 @@ chat.example.com
 
 打开后第一次会看到登录界面。
 
+iOS 客户端构建：
+
+```bash
+./script/build_ios.sh debug
+open apps/ios/SecureChatIOS/SecureChatIOS.xcodeproj
+```
+
+iOS 与 macOS 使用同一个 Rust FFI 安全核心和同一个 relay 协议，只要 Relay URL 一致，就可以互相加好友和收发消息。
+
 ## 第一次创建本地身份
 
 在登录界面填写：
@@ -43,7 +52,7 @@ chat.example.com
 
 客户端会在本机创建匿名账号和设备身份：
 
-- 身份私钥保存到 macOS Keychain
+- 身份私钥保存到 Apple Keychain
 - 联系人、会话状态和本地消息缓存保存到 SQLite
 - 本地消息正文和 ratchet session 会加密后落盘
 
@@ -120,9 +129,9 @@ Command + Return
 工具栏有两个接收相关控件：
 
 - `Receive`：手动从 relay 拉取密文和回执
-- `Auto`：后台自动轮询，默认开启
+- `Auto`：自动轮询，默认开启
 
-收到新消息时，客户端会触发 macOS 通知。第一次使用时，系统可能会询问是否允许 SecureChat 发送通知。
+收到新消息时，客户端会触发系统通知。第一次使用时，系统可能会询问是否允许 SecureChat 发送通知。
 
 ## 切换 relay
 
@@ -137,7 +146,7 @@ Command + Return
 ## 两个人跨公网互聊的最短路径
 
 1. 服务器部署 relay。
-2. Alice 和 Bob 都把 Relay URL 设置成 `quic://chat.example.com:443`。
+2. Alice 和 Bob 都把 Relay URL 设置成 `quic://chat.example.com:443`，无论一方是 macOS 还是 iOS。
 3. Alice 复制 invite 给 Bob。
 4. Bob 导入 Alice invite。
 5. Bob 复制 invite 给 Alice。

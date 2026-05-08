@@ -1,7 +1,8 @@
 # SecureChat
 
 SecureChat is a self-hosted E2EE chat prototype with a Rust security core, a
-Rust relay, and a native macOS SwiftUI desktop client.
+Rust relay, a native macOS SwiftUI desktop client, and a native iOS SwiftUI
+client that shares the same Rust FFI runtime and relay protocol.
 
 It includes:
 
@@ -17,7 +18,8 @@ It includes:
 - SQLite desktop storage for contacts, encrypted ratchet sessions, encrypted
   message bodies, and cached relay ciphertext
 - SwiftUI login, contacts, invite import/copy, chat transcript, relay settings,
-  background polling, notifications, and sent/delivered/read state display
+  background polling, notifications, and sent/delivered/read state display on
+  macOS and iOS
 
 This is a production-deployable prototype, not audited security software. Do not
 market it as "absolutely secure" before an external cryptographic and
@@ -36,6 +38,17 @@ Build without launching, useful for CI:
 ```bash
 ./script/build_and_run.sh --build-only
 ```
+
+Build the iOS simulator client and package the Rust FFI static library as an
+XCFramework:
+
+```bash
+./script/build_ios.sh debug
+open apps/ios/SecureChatIOS/SecureChatIOS.xcodeproj
+```
+
+The iOS project expects `dist/SecureChatFFI.xcframework`, which the script
+generates from the same `secure-chat-ffi` C ABI used by the macOS client.
 
 Run the Rust test suite:
 
@@ -72,16 +85,17 @@ For server deployment and user-facing setup:
 - English relay deployment: [docs/deploy-relay.md](docs/deploy-relay.md)
 - 中文公共服务器部署指南：[docs/zh/public-server-deployment.md](docs/zh/public-server-deployment.md)
 - 中文客户端使用教程：[docs/zh/usage-guide.md](docs/zh/usage-guide.md)
+- 中文 iOS 构建与互联教程：[docs/zh/ios-client.md](docs/zh/ios-client.md)
 - Production environment example: [deploy/relay.env.example](deploy/relay.env.example)
 
 ## Two-User Flow
 
 1. Deploy or start one relay.
-2. On both desktop clients, set the same relay URL:
+2. On every client, including macOS and iOS, set the same relay URL:
    - `https://chat.example.com`
    - or `quic://chat.example.com:443`
-3. User A creates an invite link from the app.
-4. User B imports the invite through Add Contact.
+3. User A creates an invite link from the macOS or iOS app.
+4. User B imports the invite through Add Contact on any supported platform.
 5. Compare the safety code or QR through an out-of-band trusted channel.
 6. Send messages. The app polls in the background, shows notifications, and
    updates sent/delivered/read states from relay receipts.
@@ -106,6 +120,10 @@ Plaintext stays inside the endpoint runtimes.
   state, SQLite persistence, ciphertext queues, and receipt queues.
 - `crates/secure-chat-ffi`: C ABI surface consumed by the SwiftUI app.
 - `apps/macos/SecureChatMac`: native macOS SwiftUI client.
+- `apps/ios/SecureChatIOS`: native iOS SwiftUI client. It links
+  `dist/SecureChatFFI.xcframework` and uses the same JSON FFI commands,
+  SQLite schema, Apple Keychain storage, invite format, relay API, and E2EE
+  protocol as the macOS client.
 
 ## Protocol Snapshot
 
@@ -135,6 +153,10 @@ Plaintext stays inside the endpoint runtimes.
 - P2P candidate probing is represented in the transport abstraction but is not
   yet a complete NAT-traversal stack.
 - The macOS app uses background polling, not APNs push.
+- The iOS app currently polls while running/foregrounded. Production iOS
+  background delivery still needs APNs or PushKit-style server integration.
+- Real iPhone/iPad installation requires setting an Apple development team and
+  bundle identifier in the iOS Xcode project.
 - The relay has durable SQLite queues, but it is not horizontally replicated.
 - The cryptographic design and implementation still need third-party audit
   before public security claims.

@@ -14,7 +14,7 @@ https://chat.example.com
 ```mermaid
 flowchart LR
     A["macOS Client A"] -->|"E2EE ciphertext over QUIC/HTTPS"| R["SecureChat Relay"]
-    B["macOS Client B"] -->|"E2EE ciphertext over QUIC/HTTPS"| R
+    B["iOS Client B"] -->|"E2EE ciphertext over QUIC/HTTPS"| R
     R --> D[("SQLite: pre-key bundles, ciphertext queue, receipts")]
 ```
 
