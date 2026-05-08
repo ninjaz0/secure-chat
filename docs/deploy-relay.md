@@ -1,0 +1,191 @@
+# SecureChat Relay Production Deployment
+
+This guide deploys one SecureChat relay with HTTPS, QUIC, SQLite persistence,
+systemd supervision, and Let's Encrypt TLS certificates.
+
+The relay still never sees plaintext or E2EE session keys. It stores public
+pre-key bundles, opaque ciphertext queues, and delivery/read receipts.
+
+## Server Requirements
+
+- Ubuntu 22.04 or 24.04 LTS
+- one DNS name, for example `chat.example.com`, pointing to the server
+- open ports:
+  - `80/tcp` for the first Let's Encrypt certificate issuance
+  - `443/tcp` for HTTPS relay traffic
+  - `443/udp` for QUIC relay traffic
+- at least 1 vCPU, 1 GB RAM, and persistent disk for `/var/lib/secure-chat`
+
+## Recommended Systemd Deployment
+
+Install server packages:
+
+```bash
+sudo apt update
+sudo apt install -y build-essential curl pkg-config libssl-dev certbot ufw
+```
+
+Install Rust if the server does not already have it:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
+Build the relay from this repository:
+
+```bash
+cargo build --release -p secure-chat-relay
+```
+
+Create the service user and install directories:
+
+```bash
+sudo useradd --system --home /var/lib/secure-chat --shell /usr/sbin/nologin securechat || true
+sudo install -d -o securechat -g securechat -m 0750 /var/lib/secure-chat
+sudo install -d -m 0755 /opt/secure-chat /etc/secure-chat
+sudo install -d -o securechat -g securechat -m 0750 /etc/secure-chat/tls
+sudo install -m 0755 target/release/secure-chat-relay /opt/secure-chat/secure-chat-relay
+```
+
+Issue a certificate. Replace `chat.example.com` with your real relay hostname:
+
+```bash
+sudo ufw allow 80/tcp
+sudo certbot certonly --standalone -d chat.example.com
+```
+
+Copy the certificate into a directory readable by the `securechat` service user:
+
+```bash
+sudo DOMAIN=chat.example.com ./deploy/copy-letsencrypt-certs.sh
+```
+
+Create `/etc/secure-chat/relay.env`:
+
+```bash
+sudo tee /etc/secure-chat/relay.env >/dev/null <<'EOF'
+SECURE_CHAT_RELAY_HTTP_ADDR=127.0.0.1:8787
+SECURE_CHAT_RELAY_HTTPS_ADDR=0.0.0.0:443
+SECURE_CHAT_RELAY_QUIC_ADDR=0.0.0.0:443
+SECURE_CHAT_TLS_CERT=/etc/secure-chat/tls/fullchain.pem
+SECURE_CHAT_TLS_KEY=/etc/secure-chat/tls/privkey.pem
+SECURE_CHAT_RELAY_DB=/var/lib/secure-chat/relay.sqlite3
+RUST_LOG=secure_chat_relay=info,tower_http=warn
+EOF
+```
+
+Install and start the service:
+
+```bash
+sudo cp deploy/secure-chat-relay.service /etc/systemd/system/secure-chat-relay.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now secure-chat-relay
+```
+
+Open production traffic:
+
+```bash
+sudo ufw allow 443/tcp
+sudo ufw allow 443/udp
+sudo ufw enable
+```
+
+Verify HTTPS:
+
+```bash
+curl -fsS https://chat.example.com/health
+```
+
+Verify QUIC from a checkout that can reach the server:
+
+```bash
+SECURE_CHAT_SMOKE_RELAY_URL=quic://chat.example.com:443 \
+cargo run -p secure-chat-client --bin secure-chat-smoke
+```
+
+Configure desktop clients with either:
+
+```text
+https://chat.example.com
+quic://chat.example.com:443
+```
+
+Use `quic://...` for QUIC-first operation. Keep `https://...` as the fallback
+URL when testing firewalls that block UDP.
+
+## Certificate Renewal
+
+Install a renewal hook so Certbot copies fresh certificates and restarts the
+relay:
+
+```bash
+sudo install -m 0755 deploy/copy-letsencrypt-certs.sh /opt/secure-chat/copy-letsencrypt-certs.sh
+sudo tee /etc/letsencrypt/renewal-hooks/deploy/secure-chat-relay >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+DOMAIN=chat.example.com /opt/secure-chat/copy-letsencrypt-certs.sh
+systemctl restart secure-chat-relay
+EOF
+sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/secure-chat-relay
+sudo certbot renew --dry-run
+```
+
+## Optional Docker Deployment
+
+Prepare certificate files in `./certs/fullchain.pem` and `./certs/privkey.pem`.
+The private key must be readable by UID `10001` inside the container:
+
+```bash
+mkdir -p certs data
+sudo cp /etc/letsencrypt/live/chat.example.com/fullchain.pem certs/fullchain.pem
+sudo cp /etc/letsencrypt/live/chat.example.com/privkey.pem certs/privkey.pem
+sudo chown -R 10001:10001 certs data
+sudo chmod 0644 certs/fullchain.pem
+sudo chmod 0600 certs/privkey.pem
+docker compose up -d --build
+```
+
+The Compose file exposes:
+
+- `8787/tcp` for local HTTP diagnostics
+- `443/tcp` for HTTPS
+- `443/udp` for QUIC
+
+## Operations
+
+Check service state and logs:
+
+```bash
+systemctl status secure-chat-relay
+journalctl -u secure-chat-relay -f
+```
+
+Back up relay metadata and offline ciphertext queues:
+
+```bash
+sudo systemctl stop secure-chat-relay
+sudo sqlite3 /var/lib/secure-chat/relay.sqlite3 ".backup '/var/backups/secure-chat-relay.sqlite3'"
+sudo systemctl start secure-chat-relay
+```
+
+Upgrade:
+
+```bash
+git pull
+cargo build --release -p secure-chat-relay
+sudo install -m 0755 target/release/secure-chat-relay /opt/secure-chat/secure-chat-relay
+sudo systemctl restart secure-chat-relay
+```
+
+## Security Notes
+
+- Do not claim this is audited security software before an external review.
+- Keep the OS, Rust toolchain, and dependencies patched.
+- Run one relay hostname per trust boundary; do not mix test and production
+  clients on the same SQLite database.
+- Back up `/var/lib/secure-chat/relay.sqlite3`. Losing it removes queued offline
+  ciphertext and published pre-key bundles, but not user plaintext.
+- The relay stores ciphertext metadata needed for delivery. It does not store
+  message bodies in plaintext, session keys, local device identity keys, or
+  decrypted contact data.

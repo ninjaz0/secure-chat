@@ -1,0 +1,8 @@
+target/
+dist/
+.build/
+apps/macos/SecureChatMac/.build/
+.DS_Store
+*.xcuserdata/
+DerivedData/
+

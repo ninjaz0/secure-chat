@@ -1,0 +1,20 @@
+services:
+  relay:
+    build: .
+    image: secure-chat-relay:latest
+    restart: unless-stopped
+    environment:
+      SECURE_CHAT_RELAY_HTTP_ADDR: 0.0.0.0:8787
+      SECURE_CHAT_RELAY_HTTPS_ADDR: 0.0.0.0:443
+      SECURE_CHAT_RELAY_QUIC_ADDR: 0.0.0.0:443
+      SECURE_CHAT_TLS_CERT: /certs/fullchain.pem
+      SECURE_CHAT_TLS_KEY: /certs/privkey.pem
+      SECURE_CHAT_RELAY_DB: /data/relay.sqlite3
+      RUST_LOG: secure_chat_relay=info,tower_http=warn
+    ports:
+      - "8787:8787/tcp"
+      - "443:443/tcp"
+      - "443:443/udp"
+    volumes:
+      - ./data:/data
+      - ./certs:/certs:ro

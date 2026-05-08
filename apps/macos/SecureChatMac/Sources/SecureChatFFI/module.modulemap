@@ -1,0 +1,6 @@
+module SecureChatFFI [system] {
+  header "include/secure_chat_ffi.h"
+  link "secure_chat_ffi"
+  export *
+}
+
