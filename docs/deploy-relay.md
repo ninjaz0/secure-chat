@@ -12,9 +12,9 @@ relay operations are authenticated with per-device Ed25519 request signatures.
 ## Server Requirements
 
 - Ubuntu 22.04 or 24.04 LTS
-- one DNS name, for example `chat.example.com`, pointing to the server
+- one public IPv4 address. A DNS name such as `chat.example.com` is optional
 - open ports:
-  - `80/tcp` for the first Let's Encrypt certificate issuance
+  - `80/tcp` for Let's Encrypt certificate issuance and renewal
   - `443/tcp` for HTTPS relay traffic
   - `443/udp` for QUIC relay traffic
 - at least 1 vCPU, 1 GB RAM, and persistent disk for `/var/lib/secure-chat`
@@ -30,8 +30,18 @@ the server management command:
 ```bash
 git clone https://github.com/ninjaz0/secure-chat.git
 cd secure-chat
+./deploy/install-relay.sh --email you@example.com
+```
+
+If you have a domain, pass it explicitly:
+
+```bash
 ./deploy/install-relay.sh --domain chat.example.com --email you@example.com
 ```
+
+Without `--domain`, the installer detects the server public IP address and
+requests a Let's Encrypt IP address certificate. IP certificates are
+short-lived, so the installer also creates a systemd renewal timer.
 
 After deployment, open the maintenance menu on the server with:
 
@@ -54,15 +64,18 @@ chatrelay renew
 Use these client URLs:
 
 ```text
-https://chat.example.com
-quic://chat.example.com:443
+https://203.0.113.10
+quic://203.0.113.10:443
 ```
+
+The installer prints the exact URLs for your server at the end of deployment;
+copy either one into the SecureChat client Relay URL field.
 
 If certificates already exist at `/etc/secure-chat/tls/fullchain.pem` and
 `/etc/secure-chat/tls/privkey.pem`, use:
 
 ```bash
-./deploy/install-relay.sh --domain chat.example.com --skip-certbot
+./deploy/install-relay.sh --ip-address 203.0.113.10 --skip-certbot
 ```
 
 ## Manual Systemd Deployment

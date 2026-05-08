@@ -9,6 +9,13 @@ BACKUP_DIR="${CHATRELAY_BACKUP_DIR:-/var/backups/secure-chat}"
 BIN_PATH="${CHATRELAY_BIN_PATH:-/opt/secure-chat/secure-chat-relay}"
 REPO_DIR="${CHATRELAY_REPO_DIR:-}"
 DOMAIN="${CHATRELAY_DOMAIN:-}"
+PUBLIC_IP="${CHATRELAY_PUBLIC_IP:-}"
+CERT_MODE="${CHATRELAY_CERT_MODE:-}"
+CERT_NAME="${CHATRELAY_CERT_NAME:-}"
+CLIENT_HTTPS_URL="${CHATRELAY_CLIENT_HTTPS_URL:-}"
+CLIENT_QUIC_URL="${CHATRELAY_CLIENT_QUIC_URL:-}"
+CERTBOT_CMD="${CHATRELAY_CERTBOT_CMD:-certbot}"
+STAGING="${CHATRELAY_STAGING:-0}"
 
 if [[ -r "$DEPLOY_CONF" ]]; then
   # shellcheck disable=SC1090
@@ -22,6 +29,13 @@ fi
 
 REPO_DIR="${CHATRELAY_REPO_DIR:-$REPO_DIR}"
 DOMAIN="${CHATRELAY_DOMAIN:-$DOMAIN}"
+PUBLIC_IP="${CHATRELAY_PUBLIC_IP:-$PUBLIC_IP}"
+CERT_MODE="${CHATRELAY_CERT_MODE:-$CERT_MODE}"
+CERT_NAME="${CHATRELAY_CERT_NAME:-$CERT_NAME}"
+CLIENT_HTTPS_URL="${CHATRELAY_CLIENT_HTTPS_URL:-$CLIENT_HTTPS_URL}"
+CLIENT_QUIC_URL="${CHATRELAY_CLIENT_QUIC_URL:-$CLIENT_QUIC_URL}"
+CERTBOT_CMD="${CHATRELAY_CERTBOT_CMD:-$CERTBOT_CMD}"
+STAGING="${CHATRELAY_STAGING:-$STAGING}"
 
 need_sudo() {
   if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
@@ -67,13 +81,17 @@ health_check() {
   curl -fsS "http://127.0.0.1:8787/health" || true
   printf '\n'
 
-  if [[ -n "${DOMAIN:-}" ]]; then
+  if [[ -n "${CLIENT_HTTPS_URL:-}" ]]; then
     print_header "Public HTTPS health"
-    curl -fsS "https://$DOMAIN/health" || true
+    local curl_args=(-fsS)
+    if [[ "${STAGING:-0}" -eq 1 ]]; then
+      curl_args+=(-k)
+    fi
+    curl "${curl_args[@]}" "$CLIENT_HTTPS_URL/health" || true
     printf '\n'
-    printf 'Client URLs:\n  https://%s\n  quic://%s:443\n' "$DOMAIN" "$DOMAIN"
+    printf 'Client URLs:\n  %s\n  %s\n' "$CLIENT_HTTPS_URL" "$CLIENT_QUIC_URL"
   else
-    printf 'No CHATRELAY_DOMAIN found in %s; skipping public health check.\n' "$DEPLOY_CONF"
+    printf 'No client URL found in %s; skipping public health check.\n' "$DEPLOY_CONF"
   fi
 }
 
@@ -117,13 +135,13 @@ backup_db() {
 }
 
 renew_cert() {
-  if [[ -z "${DOMAIN:-}" ]]; then
-    printf 'CHATRELAY_DOMAIN is missing in %s\n' "$DEPLOY_CONF" >&2
+  if [[ -z "${CERT_NAME:-}" ]]; then
+    printf 'CHATRELAY_CERT_NAME is missing in %s\n' "$DEPLOY_CONF" >&2
     exit 1
   fi
 
-  need_sudo certbot renew
-  need_sudo env DOMAIN="$DOMAIN" /opt/secure-chat/copy-letsencrypt-certs.sh
+  need_sudo "$CERTBOT_CMD" renew
+  need_sudo env CERT_NAME="$CERT_NAME" /opt/secure-chat/copy-letsencrypt-certs.sh
   service_restart
 }
 
@@ -160,9 +178,16 @@ print_info() {
   printf 'Config:  %s\n' "$ENV_FILE"
   printf 'DB:      %s\n' "${SECURE_CHAT_RELAY_DB:-/var/lib/secure-chat/relay.sqlite3}"
   printf 'Repo:    %s\n' "${REPO_DIR:-not configured}"
+  printf 'Mode:    %s\n' "${CERT_MODE:-unknown}"
   if [[ -n "${DOMAIN:-}" ]]; then
-    printf 'HTTPS:   https://%s\n' "$DOMAIN"
-    printf 'QUIC:    quic://%s:443\n' "$DOMAIN"
+    printf 'Domain:  %s\n' "$DOMAIN"
+  fi
+  if [[ -n "${PUBLIC_IP:-}" ]]; then
+    printf 'IP:      %s\n' "$PUBLIC_IP"
+  fi
+  if [[ -n "${CLIENT_HTTPS_URL:-}" ]]; then
+    printf 'HTTPS:   %s\n' "$CLIENT_HTTPS_URL"
+    printf 'QUIC:    %s\n' "$CLIENT_QUIC_URL"
   fi
 }
 

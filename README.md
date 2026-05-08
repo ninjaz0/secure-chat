@@ -98,7 +98,9 @@ SECURE_CHAT_RELAY_DB=/var/lib/secure-chat/relay.sqlite3 \
 
 For server deployment and user-facing setup:
 
-- One-command relay installer for Ubuntu 22.04/24.04 LTS: `./deploy/install-relay.sh --domain chat.example.com --email you@example.com`
+- One-command relay installer for Ubuntu 22.04/24.04 LTS:
+  - no domain, use the server public IP: `./deploy/install-relay.sh --email you@example.com`
+  - with a domain: `./deploy/install-relay.sh --domain chat.example.com --email you@example.com`
 - Server maintenance command after install: `chatrelay`
 - English relay deployment: [docs/deploy-relay.md](docs/deploy-relay.md)
 - 中文公共服务器部署指南：[docs/zh/public-server-deployment.md](docs/zh/public-server-deployment.md)
