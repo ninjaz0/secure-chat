@@ -1,5 +1,7 @@
 # SecureChat Relay Production Deployment
 
+Chinese public-server deployment guide: [docs/zh/public-server-deployment.md](zh/public-server-deployment.md).
+
 This guide deploys one SecureChat relay with HTTPS, QUIC, SQLite persistence,
 systemd supervision, and Let's Encrypt TLS certificates.
 
@@ -62,18 +64,12 @@ Copy the certificate into a directory readable by the `securechat` service user:
 sudo DOMAIN=chat.example.com ./deploy/copy-letsencrypt-certs.sh
 ```
 
-Create `/etc/secure-chat/relay.env`:
+Create `/etc/secure-chat/relay.env`. You can start from
+`deploy/relay.env.example`:
 
 ```bash
-sudo tee /etc/secure-chat/relay.env >/dev/null <<'EOF'
-SECURE_CHAT_RELAY_HTTP_ADDR=127.0.0.1:8787
-SECURE_CHAT_RELAY_HTTPS_ADDR=0.0.0.0:443
-SECURE_CHAT_RELAY_QUIC_ADDR=0.0.0.0:443
-SECURE_CHAT_TLS_CERT=/etc/secure-chat/tls/fullchain.pem
-SECURE_CHAT_TLS_KEY=/etc/secure-chat/tls/privkey.pem
-SECURE_CHAT_RELAY_DB=/var/lib/secure-chat/relay.sqlite3
-RUST_LOG=secure_chat_relay=info,tower_http=warn
-EOF
+sudo cp deploy/relay.env.example /etc/secure-chat/relay.env
+sudo nano /etc/secure-chat/relay.env
 ```
 
 Install and start the service:

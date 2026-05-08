@@ -67,7 +67,12 @@ SECURE_CHAT_RELAY_DB=/var/lib/secure-chat/relay.sqlite3 \
 ./script/run_relay.sh
 ```
 
-For server deployment, use [docs/deploy-relay.md](docs/deploy-relay.md).
+For server deployment and user-facing setup:
+
+- English relay deployment: [docs/deploy-relay.md](docs/deploy-relay.md)
+- 中文公共服务器部署指南：[docs/zh/public-server-deployment.md](docs/zh/public-server-deployment.md)
+- 中文客户端使用教程：[docs/zh/usage-guide.md](docs/zh/usage-guide.md)
+- Production environment example: [deploy/relay.env.example](deploy/relay.env.example)
 
 ## Two-User Flow
 
