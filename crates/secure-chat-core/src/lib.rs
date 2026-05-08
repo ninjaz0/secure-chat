@@ -17,9 +17,11 @@ pub use protocol::{
 };
 pub use relay_api::{
     sign_relay_auth_for_request, verify_relay_auth_for_request, DrainReceiptsResponse,
-    DrainRequest, DrainResponse, QueuedMessage, QueuedReceipt, ReceiptKind, ReceiptRequest,
+    DrainRequest, DrainResponse, ListP2pCandidatesRequest, P2pCandidate, P2pCandidateDraft,
+    P2pCandidateKind, P2pCandidatesResponse, P2pProbeRequest, P2pProbeResponse,
+    PublishP2pCandidatesRequest, QueuedMessage, QueuedReceipt, ReceiptKind, ReceiptRequest,
     RegisterRequest, RegisterResponse, RelayAuth, RelayCommand, RelayCommandResponse, SendRequest,
-    RELAY_AUTH_MAX_SKEW_SECS, RELAY_QUIC_ALPN,
+    P2P_CANDIDATE_TTL_SECS, P2P_RENDEZVOUS_DEFAULT_PORT, RELAY_AUTH_MAX_SKEW_SECS, RELAY_QUIC_ALPN,
 };
 pub use safety::{safety_number, SafetyFingerprint};
-pub use transport::{ObfuscationProfile, TransportFrame, TransportKind};
+pub use transport::{ObfuscationProfile, P2pDirectDatagram, TransportFrame, TransportKind};

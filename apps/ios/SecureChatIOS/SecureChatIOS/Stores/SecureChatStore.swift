@@ -5,6 +5,7 @@ final class SecureChatStore: ObservableObject {
     @Published private(set) var appSnapshot: AppSnapshot?
     @Published private(set) var selfTest: SelfTestResult?
     @Published private(set) var relaySmoke: RelaySmokeResult?
+    @Published private(set) var p2pProbe: P2pProbeResult?
     @Published var selectedContactID: String?
     @Published var autoReceiveEnabled: Bool {
         didSet { defaults.set(autoReceiveEnabled, forKey: PreferenceKey.autoReceiveEnabled) }
@@ -117,6 +118,12 @@ final class SecureChatStore: ObservableObject {
     func runRelaySmoke() async {
         await runLoading {
             relaySmoke = try SecureChatCoreClient.runRelaySmoke()
+        }
+    }
+
+    func runP2PProbe() async {
+        await runLoading {
+            p2pProbe = try SecureChatCoreClient.runP2PProbe()
         }
     }
 

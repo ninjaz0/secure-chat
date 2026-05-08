@@ -5,6 +5,7 @@ final class SecureChatStore: ObservableObject {
     @Published private(set) var demo: DemoState?
     @Published private(set) var selfTest: SelfTestResult?
     @Published private(set) var relaySmoke: RelaySmokeResult?
+    @Published private(set) var p2pProbe: P2pProbeResult?
     @Published private(set) var appSnapshot: AppSnapshot?
     @Published var selectedContactID: String?
     @Published var autoReceiveEnabled: Bool {
@@ -91,6 +92,17 @@ final class SecureChatStore: ObservableObject {
         do {
             relaySmoke = try SecureChatCoreClient.runRelaySmoke()
             errorMessage = relaySmoke?.ok == true ? nil : "Relay smoke failed."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func runP2PProbe() async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            p2pProbe = try SecureChatCoreClient.runP2PProbe()
+            errorMessage = p2pProbe?.ok == true ? nil : "P2P NAT probe failed."
         } catch {
             errorMessage = error.localizedDescription
         }

@@ -17,6 +17,7 @@ relay operations are authenticated with per-device Ed25519 request signatures.
   - `80/tcp` for Let's Encrypt certificate issuance and renewal
   - `443/tcp` for HTTPS relay traffic
   - `443/udp` for QUIC relay traffic
+  - `3478/udp` for signed P2P rendezvous and NAT candidate discovery
 - at least 1 vCPU, 1 GB RAM, and persistent disk for `/var/lib/secure-chat`
 
 ## One-Command Systemd Deployment
@@ -41,7 +42,9 @@ If you have a domain, pass it explicitly:
 
 Without `--domain`, the installer detects the server public IP address and
 requests a Let's Encrypt IP address certificate. IP certificates are
-short-lived, so the installer also creates a systemd renewal timer.
+short-lived, so the installer also creates a systemd renewal timer. It also
+opens a signed UDP rendezvous listener on `3478/udp` so clients can discover
+their public NAT mapping before trying direct P2P.
 
 After deployment, open the maintenance menu on the server with:
 
@@ -144,6 +147,7 @@ Open production traffic:
 ```bash
 sudo ufw allow 443/tcp
 sudo ufw allow 443/udp
+sudo ufw allow 3478/udp
 sudo ufw enable
 ```
 
@@ -207,6 +211,7 @@ The Compose file exposes:
 - `8787/tcp` for local HTTP diagnostics
 - `443/tcp` for HTTPS
 - `443/udp` for QUIC
+- `3478/udp` for signed P2P rendezvous
 
 ## Operations
 

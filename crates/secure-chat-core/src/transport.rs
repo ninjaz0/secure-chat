@@ -1,5 +1,9 @@
-use crate::crypto::{random_bytes, CryptoError};
+use crate::crypto::{random_bytes, sha256, CryptoError};
+use crate::identity::{
+    sign_bytes, verify_signature, AccountId, DeviceId, DeviceKeyMaterial, PublicDeviceIdentity,
+};
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,6 +52,20 @@ pub struct TransportFrame {
     pub padded_body: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct P2pDirectDatagram {
+    pub version: u8,
+    pub sender_account_id: AccountId,
+    pub sender_device_id: DeviceId,
+    pub receiver_account_id: AccountId,
+    pub receiver_device_id: DeviceId,
+    pub sent_unix: u64,
+    pub nonce: [u8; 16],
+    pub frame: Vec<u8>,
+    #[serde(with = "BigArray")]
+    pub signature: [u8; 64],
+}
+
 impl TransportFrame {
     pub fn protect(payload: &[u8], profile: &ObfuscationProfile) -> Result<Self, CryptoError> {
         if payload.len() > u32::MAX as usize || payload.len() + 4 > profile.fixed_frame_size {
@@ -73,6 +91,64 @@ impl TransportFrame {
             return Err(CryptoError::InvalidInput);
         }
         Ok(self.padded_body[..len].to_vec())
+    }
+}
+
+impl P2pDirectDatagram {
+    pub fn sign(
+        keys: &DeviceKeyMaterial,
+        receiver: &PublicDeviceIdentity,
+        sent_unix: u64,
+        frame: Vec<u8>,
+    ) -> Self {
+        let mut datagram = Self {
+            version: 1,
+            sender_account_id: keys.account_id,
+            sender_device_id: keys.device_id,
+            receiver_account_id: receiver.account_id,
+            receiver_device_id: receiver.device_id,
+            sent_unix,
+            nonce: random_bytes::<16>(),
+            frame,
+            signature: [0u8; 64],
+        };
+        datagram.signature = sign_bytes(&keys.device_signing_key(), &datagram.signature_payload());
+        datagram
+    }
+
+    pub fn verify(
+        &self,
+        sender: &PublicDeviceIdentity,
+        receiver: &PublicDeviceIdentity,
+    ) -> Result<(), CryptoError> {
+        if self.version != 1
+            || self.sender_account_id != sender.account_id
+            || self.sender_device_id != sender.device_id
+            || self.receiver_account_id != receiver.account_id
+            || self.receiver_device_id != receiver.device_id
+        {
+            return Err(CryptoError::InvalidInput);
+        }
+        verify_signature(
+            &sender.device_signing_public,
+            &self.signature_payload(),
+            &self.signature,
+        )
+    }
+
+    fn signature_payload(&self) -> Vec<u8> {
+        [
+            b"secure-chat-v1/p2p-direct-datagram".as_slice(),
+            &[self.version],
+            self.sender_account_id.as_bytes(),
+            self.sender_device_id.as_bytes(),
+            self.receiver_account_id.as_bytes(),
+            self.receiver_device_id.as_bytes(),
+            &self.sent_unix.to_be_bytes(),
+            self.nonce.as_slice(),
+            sha256(&[self.frame.as_slice()]).as_slice(),
+        ]
+        .concat()
     }
 }
 

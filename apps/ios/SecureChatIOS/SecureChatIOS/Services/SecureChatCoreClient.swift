@@ -22,6 +22,13 @@ enum SecureChatCoreClient {
         try decodeCString(secure_chat_relay_smoke_json(), as: RelaySmokeResult.self)
     }
 
+    static func runP2PProbe() throws -> P2pProbeResult {
+        let dataDir = appDataDirectory
+        return try dataDir.withCString { dataDirPtr in
+            try decodeCString(secure_chat_app_p2p_probe_json(dataDirPtr), as: P2pProbeResult.self)
+        }
+    }
+
     static func appSnapshot() throws -> AppSnapshot {
         let dataDir = appDataDirectory
         return try dataDir.withCString { dataDirPtr in

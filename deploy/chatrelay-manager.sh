@@ -177,6 +177,7 @@ print_info() {
   printf 'Binary:  %s\n' "$BIN_PATH"
   printf 'Config:  %s\n' "$ENV_FILE"
   printf 'DB:      %s\n' "${SECURE_CHAT_RELAY_DB:-/var/lib/secure-chat/relay.sqlite3}"
+  printf 'P2P UDP: %s\n' "${SECURE_CHAT_RELAY_P2P_ADDR:-disabled}"
   printf 'Repo:    %s\n' "${REPO_DIR:-not configured}"
   printf 'Mode:    %s\n' "${CERT_MODE:-unknown}"
   if [[ -n "${DOMAIN:-}" ]]; then

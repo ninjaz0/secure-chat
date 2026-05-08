@@ -7,6 +7,7 @@ services:
       SECURE_CHAT_RELAY_HTTP_ADDR: 0.0.0.0:8787
       SECURE_CHAT_RELAY_HTTPS_ADDR: 0.0.0.0:443
       SECURE_CHAT_RELAY_QUIC_ADDR: 0.0.0.0:443
+      SECURE_CHAT_RELAY_P2P_ADDR: 0.0.0.0:3478
       SECURE_CHAT_TLS_CERT: /certs/fullchain.pem
       SECURE_CHAT_TLS_KEY: /certs/privkey.pem
       SECURE_CHAT_RELAY_DB: /data/relay.sqlite3
@@ -15,6 +16,7 @@ services:
       - "8787:8787/tcp"
       - "443:443/tcp"
       - "443:443/udp"
+      - "3478:3478/udp"
     volumes:
       - ./data:/data
       - ./certs:/certs:ro

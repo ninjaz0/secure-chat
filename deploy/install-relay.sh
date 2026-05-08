@@ -13,6 +13,7 @@ MANAGER_PATH="/usr/local/bin/chatrelay"
 HTTP_ADDR="127.0.0.1:8787"
 HTTPS_ADDR="0.0.0.0:443"
 QUIC_ADDR="0.0.0.0:443"
+P2P_ADDR="0.0.0.0:3478"
 DOMAIN="${DOMAIN:-}"
 EMAIL="${EMAIL:-}"
 PUBLIC_IP="${PUBLIC_IP:-}"
@@ -361,6 +362,7 @@ write_env() {
 SECURE_CHAT_RELAY_HTTP_ADDR=$HTTP_ADDR
 SECURE_CHAT_RELAY_HTTPS_ADDR=$HTTPS_ADDR
 SECURE_CHAT_RELAY_QUIC_ADDR=$QUIC_ADDR
+SECURE_CHAT_RELAY_P2P_ADDR=$P2P_ADDR
 SECURE_CHAT_TLS_CERT=$TLS_DIR/fullchain.pem
 SECURE_CHAT_TLS_KEY=$TLS_DIR/privkey.pem
 SECURE_CHAT_RELAY_DB=$DATA_DIR/relay.sqlite3
@@ -461,6 +463,7 @@ configure_firewall() {
   section "Configuring UFW"
   need_sudo ufw allow 443/tcp
   need_sudo ufw allow 443/udp
+  need_sudo ufw allow 3478/udp
   need_sudo ufw --force enable
   need_sudo ufw status
 }
@@ -508,6 +511,7 @@ print_done() {
   printf '\nCopy one of these into the SecureChat client Relay URL field:\n'
   printf '  %s\n' "$CLIENT_HTTPS_URL"
   printf '  %s\n' "$CLIENT_QUIC_URL"
+  printf '\nP2P NAT traversal rendezvous is listening on UDP port 3478.\n'
   if [[ "$CERT_MODE" == "ip" && "$SKIP_CERTBOT" -eq 0 ]]; then
     printf '\nNote: IP TLS certificates are short-lived. Automatic renewal is installed with %s-cert-renew.timer.\n' "$SERVICE"
   fi

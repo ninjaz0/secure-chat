@@ -1,9 +1,12 @@
 use secure_chat_core::{
     accept_session_as_responder, start_session_as_initiator, AccountId, CipherSuite, CryptoError,
     DeviceId, DeviceKeyMaterial, DevicePreKeyBundle, DrainReceiptsResponse, DrainRequest,
-    DrainResponse, InitialMessage, Invite, ObfuscationProfile, PlainMessage, QueuedMessage,
-    QueuedReceipt, RatchetSession, ReceiptRequest, RegisterRequest, RegisterResponse, RelayCommand,
-    RelayCommandResponse, SendRequest, TransportFrame, TransportKind, WireMessage, RELAY_QUIC_ALPN,
+    DrainResponse, InitialMessage, Invite, ListP2pCandidatesRequest, ObfuscationProfile,
+    P2pCandidate, P2pCandidateDraft, P2pCandidateKind, P2pCandidatesResponse, P2pDirectDatagram,
+    P2pProbeRequest, P2pProbeResponse, PlainMessage, QueuedMessage, QueuedReceipt, RatchetSession,
+    ReceiptRequest, RegisterRequest, RegisterResponse, RelayCommand, RelayCommandResponse,
+    SendRequest, TransportFrame, TransportKind, WireMessage, P2P_RENDEZVOUS_DEFAULT_PORT,
+    RELAY_QUIC_ALPN,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,6 +16,8 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use tokio::net::UdpSocket;
+use tokio::time::{timeout, Duration};
 
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -95,6 +100,44 @@ impl RelayClient {
                     response => Err(unexpected_response(response)),
                 }
             }
+        }
+    }
+
+    pub async fn publish_p2p_candidates(
+        &self,
+        keys: &DeviceKeyMaterial,
+        candidates: Vec<P2pCandidateDraft>,
+    ) -> Result<Vec<P2pCandidate>, ClientError> {
+        let request = signed_publish_p2p_candidates_request(keys, candidates)?;
+        match &self.transport {
+            RelayTransport::Http(client) => client.publish_p2p_candidates(request).await,
+            RelayTransport::Quic(client) => match client
+                .command(RelayCommand::PublishP2pCandidates(request))
+                .await?
+            {
+                RelayCommandResponse::PublishP2pCandidates(response) => Ok(response.candidates),
+                response => Err(unexpected_response(response)),
+            },
+        }
+    }
+
+    pub async fn list_p2p_candidates(
+        &self,
+        keys: &DeviceKeyMaterial,
+        target_account_id: AccountId,
+        target_device_id: DeviceId,
+    ) -> Result<Vec<P2pCandidate>, ClientError> {
+        let request =
+            signed_list_p2p_candidates_request(keys, target_account_id, target_device_id)?;
+        match &self.transport {
+            RelayTransport::Http(client) => client.list_p2p_candidates(request).await,
+            RelayTransport::Quic(client) => match client
+                .command(RelayCommand::ListP2pCandidates(request))
+                .await?
+            {
+                RelayCommandResponse::ListP2pCandidates(response) => Ok(response.candidates),
+                response => Err(unexpected_response(response)),
+            },
         }
     }
 
@@ -228,6 +271,38 @@ impl RelayHttpClient {
             .await?)
     }
 
+    pub async fn publish_p2p_candidates(
+        &self,
+        request: secure_chat_core::PublishP2pCandidatesRequest,
+    ) -> Result<Vec<P2pCandidate>, ClientError> {
+        let response: P2pCandidatesResponse = self
+            .http
+            .post(self.url("/v1/p2p/candidates"))
+            .json(&request)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(response.candidates)
+    }
+
+    pub async fn list_p2p_candidates(
+        &self,
+        request: ListP2pCandidatesRequest,
+    ) -> Result<Vec<P2pCandidate>, ClientError> {
+        let response: P2pCandidatesResponse = self
+            .http
+            .post(self.url("/v1/p2p/candidates/list"))
+            .json(&request)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(response.candidates)
+    }
+
     pub async fn send_receipt(
         &self,
         request: ReceiptRequest,
@@ -357,6 +432,28 @@ pub struct RelaySmokeReport {
     pub alice: RelaySmokePeer,
     pub bob: RelaySmokePeer,
     pub bob_invite_uri_prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct P2pProbeReport {
+    pub ok: bool,
+    pub relay: String,
+    pub rendezvous: String,
+    pub local_addr: String,
+    pub public_candidate: P2pCandidate,
+    pub registered_candidates: Vec<P2pCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct P2pSmokeReport {
+    pub ok: bool,
+    pub relay: String,
+    pub rendezvous: String,
+    pub alice_candidate: P2pCandidate,
+    pub bob_candidate: P2pCandidate,
+    pub alice_saw_bob: Vec<P2pCandidate>,
+    pub bob_saw_alice: Vec<P2pCandidate>,
+    pub direct_payload: String,
 }
 
 pub struct SecureChatDevice {
@@ -489,6 +586,188 @@ impl SecureChatDevice {
     }
 }
 
+pub struct P2pUdpSocket {
+    socket: UdpSocket,
+    rendezvous_addr: SocketAddr,
+}
+
+impl P2pUdpSocket {
+    pub async fn bind(relay_url: &str) -> Result<Self, ClientError> {
+        let rendezvous_addr = p2p_rendezvous_addr(relay_url)?;
+        Self::bind_with_rendezvous(rendezvous_addr).await
+    }
+
+    pub async fn bind_with_rendezvous(rendezvous_addr: SocketAddr) -> Result<Self, ClientError> {
+        let bind_addr = if rendezvous_addr.is_ipv6() {
+            "[::]:0"
+        } else {
+            "0.0.0.0:0"
+        };
+        let socket = UdpSocket::bind(bind_addr)
+            .await
+            .map_err(|err| ClientError::Transport(format!("bind p2p UDP socket: {err}")))?;
+        Ok(Self {
+            socket,
+            rendezvous_addr,
+        })
+    }
+
+    pub fn local_addr(&self) -> Result<SocketAddr, ClientError> {
+        self.socket
+            .local_addr()
+            .map_err(|err| ClientError::Transport(format!("read p2p local addr: {err}")))
+    }
+
+    pub fn rendezvous_addr(&self) -> SocketAddr {
+        self.rendezvous_addr
+    }
+
+    pub async fn probe(&self, keys: &DeviceKeyMaterial) -> Result<P2pCandidate, ClientError> {
+        let request = signed_p2p_probe_request(keys)?;
+        let bytes = serde_json::to_vec(&request)?;
+        self.socket
+            .send_to(&bytes, self.rendezvous_addr)
+            .await
+            .map_err(|err| ClientError::Transport(format!("send p2p probe: {err}")))?;
+        let mut buffer = vec![0u8; 64 * 1024];
+        let (len, _) = timeout(Duration::from_secs(4), self.socket.recv_from(&mut buffer))
+            .await
+            .map_err(|_| ClientError::Transport("p2p probe timed out".to_string()))?
+            .map_err(|err| ClientError::Transport(format!("receive p2p probe: {err}")))?;
+        if let Ok(response) = serde_json::from_slice::<P2pProbeResponse>(&buffer[..len]) {
+            return Ok(response.candidate);
+        }
+        if let Ok(RelayCommandResponse::Error { status, message }) =
+            serde_json::from_slice::<RelayCommandResponse>(&buffer[..len])
+        {
+            return Err(ClientError::Transport(format!(
+                "p2p probe failed with {status}: {message}"
+            )));
+        }
+        Err(ClientError::Transport(
+            "invalid p2p probe response".to_string(),
+        ))
+    }
+
+    pub async fn send_direct_datagram(
+        &self,
+        datagram: &P2pDirectDatagram,
+        addr: SocketAddr,
+    ) -> Result<usize, ClientError> {
+        let bytes = serde_json::to_vec(datagram)?;
+        self.socket
+            .send_to(&bytes, addr)
+            .await
+            .map_err(|err| ClientError::Transport(format!("send p2p datagram: {err}")))
+    }
+
+    pub async fn receive_direct_datagram(
+        &self,
+        max_wait: Duration,
+    ) -> Result<(P2pDirectDatagram, SocketAddr), ClientError> {
+        let mut buffer = vec![0u8; 64 * 1024];
+        let (len, addr) = timeout(max_wait, self.socket.recv_from(&mut buffer))
+            .await
+            .map_err(|_| ClientError::Transport("p2p direct receive timed out".to_string()))?
+            .map_err(|err| ClientError::Transport(format!("receive p2p datagram: {err}")))?;
+        let datagram = serde_json::from_slice(&buffer[..len])?;
+        Ok((datagram, addr))
+    }
+}
+
+pub async fn run_p2p_probe_against(
+    relay_url: &str,
+    keys: &DeviceKeyMaterial,
+) -> Result<P2pProbeReport, ClientError> {
+    let relay = RelayClient::new(relay_url);
+    relay.register_device(keys).await?;
+    let socket = P2pUdpSocket::bind(relay_url).await?;
+    let public_candidate = socket.probe(keys).await?;
+    let registered_candidates = relay
+        .list_p2p_candidates(keys, keys.account_id, keys.device_id)
+        .await?;
+    Ok(P2pProbeReport {
+        ok: true,
+        relay: relay_url.to_string(),
+        rendezvous: socket.rendezvous_addr().to_string(),
+        local_addr: socket.local_addr()?.to_string(),
+        public_candidate,
+        registered_candidates,
+    })
+}
+
+pub async fn run_p2p_smoke() -> Result<P2pSmokeReport, ClientError> {
+    let (http_addr, p2p_addr, http_handle, p2p_handle) =
+        secure_chat_relay::spawn_ephemeral_with_p2p().await?;
+    let relay_url = format!("http://{http_addr}");
+    let report = run_p2p_smoke_against(&relay_url, p2p_addr).await?;
+    http_handle.abort();
+    p2p_handle.abort();
+    Ok(report)
+}
+
+pub async fn run_p2p_smoke_against(
+    relay_url: &str,
+    rendezvous_addr: SocketAddr,
+) -> Result<P2pSmokeReport, ClientError> {
+    let relay = RelayClient::new(relay_url);
+    let alice = DeviceKeyMaterial::generate(4);
+    let bob = DeviceKeyMaterial::generate(4);
+    relay.register_device(&alice).await?;
+    relay.register_device(&bob).await?;
+
+    let alice_socket = P2pUdpSocket::bind_with_rendezvous(rendezvous_addr).await?;
+    let bob_socket = P2pUdpSocket::bind_with_rendezvous(rendezvous_addr).await?;
+    let alice_candidate = alice_socket.probe(&alice).await?;
+    let bob_candidate = bob_socket.probe(&bob).await?;
+    let alice_saw_bob = relay
+        .list_p2p_candidates(&alice, bob.account_id, bob.device_id)
+        .await?;
+    let bob_saw_alice = relay
+        .list_p2p_candidates(&bob, alice.account_id, alice.device_id)
+        .await?;
+
+    let bob_addr = first_candidate_addr(&alice_saw_bob)?;
+    let alice_addr = first_candidate_addr(&bob_saw_alice)?;
+    let frame = TransportFrame::protect(b"hello over direct p2p", &p2p_probe_profile(21))?;
+    let datagram = P2pDirectDatagram::sign(
+        &alice,
+        &bob.public_identity(),
+        now_unix(),
+        serde_json::to_vec(&frame)?,
+    );
+    let reverse = P2pDirectDatagram::sign(
+        &bob,
+        &alice.public_identity(),
+        now_unix(),
+        serde_json::to_vec(&TransportFrame::protect(b"punch", &p2p_probe_profile(5))?)?,
+    );
+    let _ = bob_socket.send_direct_datagram(&reverse, alice_addr).await;
+    for _ in 0..3 {
+        alice_socket
+            .send_direct_datagram(&datagram, bob_addr)
+            .await?;
+    }
+    let (received, _) = bob_socket
+        .receive_direct_datagram(Duration::from_secs(4))
+        .await?;
+    received.verify(&alice.public_identity(), &bob.public_identity())?;
+    let direct_frame: TransportFrame = serde_json::from_slice(&received.frame)?;
+    let direct_payload = String::from_utf8(direct_frame.expose()?)
+        .map_err(|err| ClientError::Transport(format!("invalid p2p payload: {err}")))?;
+
+    Ok(P2pSmokeReport {
+        ok: true,
+        relay: relay_url.to_string(),
+        rendezvous: rendezvous_addr.to_string(),
+        alice_candidate,
+        bob_candidate,
+        alice_saw_bob,
+        bob_saw_alice,
+        direct_payload,
+    })
+}
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -502,6 +781,16 @@ fn padding_profile(payload_len: usize) -> ObfuscationProfile {
     profile
 }
 
+fn p2p_probe_profile(payload_len: usize) -> ObfuscationProfile {
+    ObfuscationProfile {
+        kind: TransportKind::QuicUdp,
+        fixed_frame_size: payload_len.saturating_add(16).max(64),
+        timing_jitter_ms: 0,
+        cover_traffic: false,
+        http3_like_cover: false,
+    }
+}
+
 fn signed_register_request(keys: &DeviceKeyMaterial) -> Result<RegisterRequest, ClientError> {
     let mut request = RegisterRequest {
         bundle: keys.pre_key_bundle(),
@@ -510,6 +799,61 @@ fn signed_register_request(keys: &DeviceKeyMaterial) -> Result<RegisterRequest, 
     request.auth = Some(secure_chat_core::sign_relay_auth_for_request(
         keys,
         "register_device",
+        &request,
+        now_unix(),
+    )?);
+    Ok(request)
+}
+
+fn signed_publish_p2p_candidates_request(
+    keys: &DeviceKeyMaterial,
+    candidates: Vec<P2pCandidateDraft>,
+) -> Result<secure_chat_core::PublishP2pCandidatesRequest, ClientError> {
+    let mut request = secure_chat_core::PublishP2pCandidatesRequest {
+        account_id: keys.account_id,
+        device_id: keys.device_id,
+        candidates,
+        auth: None,
+    };
+    request.auth = Some(secure_chat_core::sign_relay_auth_for_request(
+        keys,
+        "publish_p2p_candidates",
+        &request,
+        now_unix(),
+    )?);
+    Ok(request)
+}
+
+fn signed_list_p2p_candidates_request(
+    keys: &DeviceKeyMaterial,
+    target_account_id: AccountId,
+    target_device_id: DeviceId,
+) -> Result<ListP2pCandidatesRequest, ClientError> {
+    let mut request = ListP2pCandidatesRequest {
+        requester_account_id: keys.account_id,
+        requester_device_id: keys.device_id,
+        target_account_id,
+        target_device_id,
+        auth: None,
+    };
+    request.auth = Some(secure_chat_core::sign_relay_auth_for_request(
+        keys,
+        "list_p2p_candidates",
+        &request,
+        now_unix(),
+    )?);
+    Ok(request)
+}
+
+fn signed_p2p_probe_request(keys: &DeviceKeyMaterial) -> Result<P2pProbeRequest, ClientError> {
+    let mut request = P2pProbeRequest {
+        account_id: keys.account_id,
+        device_id: keys.device_id,
+        auth: None,
+    };
+    request.auth = Some(secure_chat_core::sign_relay_auth_for_request(
+        keys,
+        "p2p_probe",
         &request,
         now_unix(),
     )?);
@@ -560,6 +904,59 @@ fn signed_drain_request(
         now_unix(),
     )?);
     Ok(request)
+}
+
+fn p2p_rendezvous_addr(relay_url: &str) -> Result<SocketAddr, ClientError> {
+    if let Ok(addr) = std::env::var("SECURE_CHAT_P2P_RENDEZVOUS_ADDR") {
+        return addr
+            .parse()
+            .map_err(|err| ClientError::Transport(format!("invalid p2p rendezvous addr: {err}")));
+    }
+    let host = relay_host(relay_url)?;
+    (host.as_str(), P2P_RENDEZVOUS_DEFAULT_PORT)
+        .to_socket_addrs()
+        .map_err(|err| ClientError::Transport(format!("resolve p2p rendezvous: {err}")))?
+        .next()
+        .ok_or_else(|| ClientError::Transport("could not resolve p2p rendezvous".to_string()))
+}
+
+fn relay_host(relay_url: &str) -> Result<String, ClientError> {
+    let without_scheme = relay_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(relay_url);
+    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, _) = rest
+            .split_once(']')
+            .ok_or_else(|| ClientError::Transport("invalid IPv6 relay URL".to_string()))?;
+        return Ok(host.to_string());
+    }
+    let host = authority
+        .rsplit_once(':')
+        .map(|(host, port)| {
+            if port.chars().all(|ch| ch.is_ascii_digit()) {
+                host
+            } else {
+                authority
+            }
+        })
+        .unwrap_or(authority);
+    if host.is_empty() {
+        return Err(ClientError::Transport("missing relay host".to_string()));
+    }
+    Ok(host.to_string())
+}
+
+fn first_candidate_addr(candidates: &[P2pCandidate]) -> Result<SocketAddr, ClientError> {
+    candidates
+        .iter()
+        .find(|candidate| candidate.kind == P2pCandidateKind::ServerReflexive)
+        .or_else(|| candidates.first())
+        .ok_or_else(|| ClientError::Transport("no p2p candidates available".to_string()))?
+        .addr
+        .parse()
+        .map_err(|err| ClientError::Transport(format!("invalid p2p candidate addr: {err}")))
 }
 
 fn padded_bucket(payload_len: usize) -> usize {
@@ -724,5 +1121,14 @@ mod tests {
             report.alice.received,
             vec!["hi Alice, decrypted and replied"]
         );
+    }
+
+    #[tokio::test]
+    async fn p2p_rendezvous_smoke_exchanges_signed_direct_datagram() {
+        let report = run_p2p_smoke().await.unwrap();
+        assert!(report.ok);
+        assert_eq!(report.direct_payload, "hello over direct p2p");
+        assert!(!report.alice_saw_bob.is_empty());
+        assert!(!report.bob_saw_alice.is_empty());
     }
 }

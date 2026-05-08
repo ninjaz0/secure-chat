@@ -65,6 +65,13 @@ struct SettingsView: View {
                         Label("Relay Smoke Test", systemImage: "waveform.path.ecg")
                     }
 
+                    Button {
+                        Task { await store.runP2PProbe() }
+                    } label: {
+                        Label("P2P NAT Probe", systemImage: "point.3.connected.trianglepath.dotted")
+                    }
+                    .disabled(store.appSnapshot?.ready != true)
+
                     if let selfTest = store.selfTest {
                         Text(selfTest.ok ? "Protocol self-test passed" : "Protocol self-test failed")
                             .foregroundStyle(selfTest.ok ? .green : .red)
@@ -73,6 +80,11 @@ struct SettingsView: View {
                     if let relaySmoke = store.relaySmoke {
                         Text(relaySmoke.ok ? "Relay smoke test passed" : "Relay smoke test failed")
                             .foregroundStyle(relaySmoke.ok ? .green : .red)
+                    }
+
+                    if let p2pProbe = store.p2pProbe {
+                        LabeledContent("Rendezvous", value: p2pProbe.rendezvous)
+                        LabeledContent("Public UDP", value: p2pProbe.publicCandidate.addr)
                     }
                 }
 

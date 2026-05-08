@@ -129,7 +129,7 @@ Command + Return
 工具栏有两个接收相关控件：
 
 - `Receive`：手动从 relay 拉取密文和回执
-- `Auto`：自动轮询，默认开启
+- 自动轮询：在设置页里的 `Auto receive` 控制，默认开启，轮询间隔也在设置页调整
 
 收到新消息时，客户端会触发系统通知。第一次使用时，系统可能会询问是否允许 SecureChat 发送通知。
 
@@ -196,7 +196,7 @@ https://chat.example.com
 说明消息已提交到 relay，但对方还没有拉取。让对方确认：
 
 - app 正在运行
-- `Auto` 开启，或手动点 `Receive`
+- 设置页里的 `Auto receive` 开启，或手动点 `Receive Now`
 - relay URL 和你使用的是同一台服务器
 
 ### delivered 有了但没有 read
@@ -232,5 +232,5 @@ schat://invite/
 - 只支持 1 对 1 聊天。
 - 没有手机号、邮箱和公开用户名搜索。
 - macOS app 使用后台轮询，不是 APNs 推送。
-- P2P NAT traversal 还没有完整实现，当前生产路径以 relay 为主。
+- P2P NAT traversal 已支持签名 UDP rendezvous、候选地址交换和直连探测；复杂 NAT 下会继续回退到 relay。
 - 没有第三方安全审计前，不要把它当成已经审计过的安全通信产品。

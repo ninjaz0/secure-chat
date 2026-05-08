@@ -62,6 +62,23 @@ struct RelaySmokePeer: Decodable {
     let received: [String]
 }
 
+struct P2pProbeResult: Decodable {
+    let ok: Bool
+    let relay: String
+    let rendezvous: String
+    let localAddr: String
+    let publicCandidate: P2pCandidate
+    let registeredCandidates: [P2pCandidate]
+}
+
+struct P2pCandidate: Decodable, Identifiable, Hashable {
+    var id: String { kind + addr }
+    let kind: String
+    let addr: String
+    let updatedUnix: UInt64
+    let expiresUnix: UInt64
+}
+
 struct AppSnapshot: Decodable {
     let ready: Bool
     let profile: AppProfile?

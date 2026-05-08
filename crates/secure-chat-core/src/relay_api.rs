@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 pub const RELAY_QUIC_ALPN: &[u8] = b"secure-chat-relay/1";
 pub const RELAY_AUTH_MAX_SKEW_SECS: u64 = 5 * 60;
+pub const P2P_RENDEZVOUS_DEFAULT_PORT: u16 = 3478;
+pub const P2P_CANDIDATE_TTL_SECS: u64 = 2 * 60;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RelayAuth {
@@ -37,6 +39,61 @@ pub struct RegisterRequest {
 pub struct RegisterResponse {
     pub account_id: AccountId,
     pub device_id: DeviceId,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum P2pCandidateKind {
+    Host,
+    ServerReflexive,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct P2pCandidateDraft {
+    pub kind: P2pCandidateKind,
+    pub addr: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct P2pCandidate {
+    pub kind: P2pCandidateKind,
+    pub addr: String,
+    pub updated_unix: u64,
+    pub expires_unix: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct P2pProbeRequest {
+    pub account_id: AccountId,
+    pub device_id: DeviceId,
+    pub auth: Option<RelayAuth>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct P2pProbeResponse {
+    pub candidate: P2pCandidate,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PublishP2pCandidatesRequest {
+    pub account_id: AccountId,
+    pub device_id: DeviceId,
+    pub candidates: Vec<P2pCandidateDraft>,
+    pub auth: Option<RelayAuth>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListP2pCandidatesRequest {
+    pub requester_account_id: AccountId,
+    pub requester_device_id: DeviceId,
+    pub target_account_id: AccountId,
+    pub target_device_id: DeviceId,
+    pub auth: Option<RelayAuth>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct P2pCandidatesResponse {
+    pub candidates: Vec<P2pCandidate>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -109,6 +166,8 @@ pub enum RelayCommand {
     Health,
     RegisterDevice(RegisterRequest),
     ListDevices { account_id: AccountId },
+    PublishP2pCandidates(PublishP2pCandidatesRequest),
+    ListP2pCandidates(ListP2pCandidatesRequest),
     SendMessage(SendRequest),
     DrainMessages(DrainRequest),
     SendReceipt(ReceiptRequest),
@@ -121,6 +180,8 @@ pub enum RelayCommandResponse {
     Health(serde_json::Value),
     RegisterDevice(RegisterResponse),
     ListDevices(Vec<DevicePreKeyBundle>),
+    PublishP2pCandidates(P2pCandidatesResponse),
+    ListP2pCandidates(P2pCandidatesResponse),
     SendMessage(QueuedMessage),
     DrainMessages(DrainResponse),
     SendReceipt(QueuedReceipt),

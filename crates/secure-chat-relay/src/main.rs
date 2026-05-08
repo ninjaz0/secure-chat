@@ -29,6 +29,13 @@ async fn main() {
                 .parse::<SocketAddr>()
                 .expect("valid SECURE_CHAT_RELAY_QUIC_ADDR")
         });
+    let p2p_addr = std::env::var("SECURE_CHAT_RELAY_P2P_ADDR")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<SocketAddr>()
+                .expect("valid SECURE_CHAT_RELAY_P2P_ADDR")
+        });
     let cert = std::env::var("SECURE_CHAT_TLS_CERT").ok();
     let key = std::env::var("SECURE_CHAT_TLS_KEY").ok();
     let state = match std::env::var("SECURE_CHAT_RELAY_DB") {
@@ -40,9 +47,27 @@ async fn main() {
 
     match (https_addr, quic_addr, cert, key) {
         (None, None, _, _) => {
-            secure_chat_relay::run_http_with_state(http_addr, state)
-                .await
-                .expect("serve relay");
+            if let Some(p2p_addr) = p2p_addr {
+                let http_state = state.clone();
+                let http = tokio::spawn(async move {
+                    secure_chat_relay::run_http_with_state(http_addr, http_state)
+                        .await
+                        .map_err(|err| err.to_string())
+                });
+                let p2p = tokio::spawn(async move {
+                    secure_chat_relay::run_p2p_rendezvous_with_state(p2p_addr, state)
+                        .await
+                        .map_err(|err| err.to_string())
+                });
+                tokio::select! {
+                    result = http => panic!("HTTP relay exited: {:?}", result),
+                    result = p2p => panic!("P2P rendezvous exited: {:?}", result),
+                }
+            } else {
+                secure_chat_relay::run_http_with_state(http_addr, state)
+                    .await
+                    .expect("serve relay");
+            }
         }
         (https_addr, quic_addr, Some(cert), Some(key)) => {
             let http_state = state.clone();
@@ -71,6 +96,14 @@ async fn main() {
                         .map_err(|err| err.to_string())
                 })
             });
+            let p2p = p2p_addr.map(|addr| {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    secure_chat_relay::run_p2p_rendezvous_with_state(addr, state)
+                        .await
+                        .map_err(|err| err.to_string())
+                })
+            });
 
             tokio::select! {
                 result = http => panic!("HTTP relay exited: {:?}", result),
@@ -80,6 +113,9 @@ async fn main() {
                 result = async {
                     if let Some(quic) = quic { quic.await } else { std::future::pending().await }
                 } => panic!("QUIC relay exited: {:?}", result),
+                result = async {
+                    if let Some(p2p) = p2p { p2p.await } else { std::future::pending().await }
+                } => panic!("P2P rendezvous exited: {:?}", result),
             }
         }
         _ => {

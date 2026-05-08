@@ -161,7 +161,8 @@ Plaintext stays inside the endpoint runtimes.
 - OOB verification: safety number and QR payload are derived from both sides'
   account/device public-key digests.
 - Transport: HTTPS and QUIC carry the same E2EE ciphertext envelopes. The core
-  also supports fixed-size padding, jitter profiles, and cover-traffic flags.
+  also supports signed P2P UDP rendezvous, NAT candidate probing, fixed-size
+  padding, jitter profiles, and cover-traffic flags.
 - Relay API auth: device Ed25519 signatures bind action, request digest,
   timestamp, nonce, account ID, and device ID; the relay rejects unsigned,
   stale, and replayed private commands.
@@ -170,8 +171,8 @@ Plaintext stays inside the endpoint runtimes.
 
 - 1:1 chat only. Group chat should use MLS later rather than stretching this
   Double Ratchet design into large groups.
-- P2P candidate probing is represented in the transport abstraction but is not
-  yet a complete NAT-traversal stack.
+- P2P NAT traversal has signed UDP rendezvous and direct-path probing, with
+  relay fallback for restrictive NATs.
 - The macOS app uses background polling, not APNs push.
 - The iOS app currently polls while running/foregrounded. Production iOS
   background delivery still needs APNs or PushKit-style server integration.

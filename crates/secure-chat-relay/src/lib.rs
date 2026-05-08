@@ -5,9 +5,10 @@ use axum::{Json, Router};
 use rusqlite::{params, Connection};
 use secure_chat_core::{
     verify_relay_auth_for_request, AccountId, DeviceId, DevicePreKeyBundle, DrainReceiptsResponse,
-    DrainRequest, DrainResponse, QueuedMessage, QueuedReceipt, ReceiptKind, ReceiptRequest,
-    RegisterRequest, RegisterResponse, RelayAuth, RelayCommand, RelayCommandResponse, SendRequest,
-    RELAY_QUIC_ALPN,
+    DrainRequest, DrainResponse, ListP2pCandidatesRequest, P2pCandidate, P2pCandidateDraft,
+    P2pCandidateKind, P2pCandidatesResponse, P2pProbeRequest, P2pProbeResponse, QueuedMessage,
+    QueuedReceipt, ReceiptKind, ReceiptRequest, RegisterRequest, RegisterResponse, RelayAuth,
+    RelayCommand, RelayCommandResponse, SendRequest, P2P_CANDIDATE_TTL_SECS, RELAY_QUIC_ALPN,
 };
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -33,6 +34,7 @@ struct RelayState {
     queues: HashMap<DeviceId, VecDeque<QueuedMessage>>,
     receipts: HashMap<DeviceId, VecDeque<QueuedReceipt>>,
     auth_nonces: HashMap<DeviceId, VecDeque<AuthNonceRecord>>,
+    p2p_candidates: HashMap<DeviceId, Vec<P2pCandidate>>,
 }
 
 #[derive(Clone)]
@@ -69,6 +71,8 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/v1/accounts", post(register_device))
         .route("/v1/accounts/:account_id/devices", get(list_devices))
+        .route("/v1/p2p/candidates", post(publish_p2p_candidates))
+        .route("/v1/p2p/candidates/list", post(list_p2p_candidates))
         .route("/v1/messages", post(send_message))
         .route("/v1/messages/drain", post(drain_messages))
         .route("/v1/receipts", post(send_receipt))
@@ -147,12 +151,62 @@ pub async fn run_quic_with_state(
     Ok(())
 }
 
+pub async fn run_p2p_rendezvous(
+    addr: SocketAddr,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_p2p_rendezvous_with_state(addr, AppState::default()).await
+}
+
+pub async fn run_p2p_rendezvous_with_state(
+    addr: SocketAddr,
+    state: AppState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let socket = tokio::net::UdpSocket::bind(addr).await?;
+    tracing::info!(%addr, "secure-chat P2P rendezvous listening");
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let (len, peer_addr) = socket.recv_from(&mut buffer).await?;
+        let response = match serde_json::from_slice::<P2pProbeRequest>(&buffer[..len]) {
+            Ok(request) => match handle_p2p_probe(&state, request, peer_addr).await {
+                Ok(response) => serde_json::to_vec(&response)?,
+                Err(status) => serde_json::to_vec(&RelayCommandResponse::Error {
+                    status: status.as_u16(),
+                    message: "p2p probe failed".to_string(),
+                })?,
+            },
+            Err(err) => serde_json::to_vec(&RelayCommandResponse::Error {
+                status: 400,
+                message: err.to_string(),
+            })?,
+        };
+        let _ = socket.send_to(&response, peer_addr).await;
+    }
+}
+
 pub async fn spawn_ephemeral() -> std::io::Result<(SocketAddr, JoinHandle<std::io::Result<()>>)> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let handle =
         tokio::spawn(async move { axum::serve(listener, router(AppState::default())).await });
     Ok((addr, handle))
+}
+
+pub async fn spawn_ephemeral_with_p2p() -> std::io::Result<(
+    SocketAddr,
+    SocketAddr,
+    JoinHandle<std::io::Result<()>>,
+    JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+)> {
+    let state = AppState::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let http_addr = listener.local_addr()?;
+    let udp_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+    let p2p_addr = udp_socket.local_addr()?;
+    drop(udp_socket);
+    let http_state = state.clone();
+    let http_handle = tokio::spawn(async move { axum::serve(listener, router(http_state)).await });
+    let p2p_handle = tokio::spawn(run_p2p_rendezvous_with_state(p2p_addr, state));
+    Ok((http_addr, p2p_addr, http_handle, p2p_handle))
 }
 
 pub async fn handle_command(state: AppState, command: RelayCommand) -> RelayCommandResponse {
@@ -167,6 +221,18 @@ pub async fn handle_command(state: AppState, command: RelayCommand) -> RelayComm
             match list_devices_inner(&state, account_id).await {
                 Ok(devices) => RelayCommandResponse::ListDevices(devices),
                 Err(status) => error_response(status, "account not found"),
+            }
+        }
+        RelayCommand::PublishP2pCandidates(request) => {
+            match publish_p2p_candidates_inner(&state, request).await {
+                Ok(response) => RelayCommandResponse::PublishP2pCandidates(response),
+                Err(status) => error_response(status, "publish p2p candidates failed"),
+            }
+        }
+        RelayCommand::ListP2pCandidates(request) => {
+            match list_p2p_candidates_inner(&state, request).await {
+                Ok(response) => RelayCommandResponse::ListP2pCandidates(response),
+                Err(status) => error_response(status, "list p2p candidates failed"),
             }
         }
         RelayCommand::SendMessage(request) => match send_message_inner(&state, request).await {
@@ -198,6 +264,7 @@ fn health_value() -> serde_json::Value {
         "service": "secure-chat-relay",
         "stores_plaintext": false,
         "transports": ["http", "https", "quic"],
+        "p2p_rendezvous": "signed_udp_observed_address",
         "receipts": ["delivered", "read"],
         "device_auth": "ed25519_request_signatures",
     })
@@ -272,6 +339,115 @@ async fn list_devices_inner(
         .cloned()
         .collect();
     Ok(devices)
+}
+
+async fn publish_p2p_candidates(
+    State(state): State<AppState>,
+    Json(request): Json<secure_chat_core::PublishP2pCandidatesRequest>,
+) -> Result<Json<P2pCandidatesResponse>, StatusCode> {
+    publish_p2p_candidates_inner(&state, request)
+        .await
+        .map(Json)
+}
+
+async fn publish_p2p_candidates_inner(
+    state: &AppState,
+    request: secure_chat_core::PublishP2pCandidatesRequest,
+) -> Result<P2pCandidatesResponse, StatusCode> {
+    let mut signed_request = request.clone();
+    signed_request.auth = None;
+    let mut inner = state.inner.write().await;
+    let device_public = device_signing_public(&inner, request.account_id, request.device_id)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    verify_relay_auth(
+        &mut inner,
+        request.account_id,
+        request.device_id,
+        &device_public,
+        "publish_p2p_candidates",
+        &signed_request,
+        request.auth.as_ref(),
+    )?;
+    let mut candidates = normalize_p2p_candidates(request.candidates)?;
+    retain_live_observed_candidates(&inner, request.device_id, &mut candidates);
+    set_p2p_candidates(state.db_path(), &mut inner, request.device_id, candidates)
+}
+
+async fn list_p2p_candidates(
+    State(state): State<AppState>,
+    Json(request): Json<ListP2pCandidatesRequest>,
+) -> Result<Json<P2pCandidatesResponse>, StatusCode> {
+    list_p2p_candidates_inner(&state, request).await.map(Json)
+}
+
+async fn list_p2p_candidates_inner(
+    state: &AppState,
+    request: ListP2pCandidatesRequest,
+) -> Result<P2pCandidatesResponse, StatusCode> {
+    let mut signed_request = request.clone();
+    signed_request.auth = None;
+    let mut inner = state.inner.write().await;
+    let requester_public = device_signing_public(
+        &inner,
+        request.requester_account_id,
+        request.requester_device_id,
+    )
+    .ok_or(StatusCode::UNAUTHORIZED)?;
+    verify_relay_auth(
+        &mut inner,
+        request.requester_account_id,
+        request.requester_device_id,
+        &requester_public,
+        "list_p2p_candidates",
+        &signed_request,
+        request.auth.as_ref(),
+    )?;
+    let target_exists = inner
+        .devices
+        .get(&request.target_account_id)
+        .and_then(|devices| devices.get(&request.target_device_id))
+        .is_some();
+    if !target_exists {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(P2pCandidatesResponse {
+        candidates: live_p2p_candidates(&mut inner, request.target_device_id),
+    })
+}
+
+async fn handle_p2p_probe(
+    state: &AppState,
+    request: P2pProbeRequest,
+    peer_addr: SocketAddr,
+) -> Result<P2pProbeResponse, StatusCode> {
+    let mut signed_request = request.clone();
+    signed_request.auth = None;
+    let mut inner = state.inner.write().await;
+    let device_public = device_signing_public(&inner, request.account_id, request.device_id)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    verify_relay_auth(
+        &mut inner,
+        request.account_id,
+        request.device_id,
+        &device_public,
+        "p2p_probe",
+        &signed_request,
+        request.auth.as_ref(),
+    )?;
+    let now = now_unix();
+    let candidate = P2pCandidate {
+        kind: P2pCandidateKind::ServerReflexive,
+        addr: peer_addr.to_string(),
+        updated_unix: now,
+        expires_unix: now + P2P_CANDIDATE_TTL_SECS,
+    };
+    upsert_p2p_candidate(
+        state.db_path(),
+        &mut inner,
+        request.device_id,
+        candidate.clone(),
+    )?;
+    Ok(P2pProbeResponse { candidate })
 }
 
 async fn send_message(
@@ -538,6 +714,99 @@ fn verify_relay_auth<T: serde::Serialize>(
     Ok(())
 }
 
+fn normalize_p2p_candidates(
+    drafts: Vec<P2pCandidateDraft>,
+) -> Result<Vec<P2pCandidate>, StatusCode> {
+    if drafts.len() > 8 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let now = now_unix();
+    let mut candidates = Vec::with_capacity(drafts.len());
+    for draft in drafts {
+        let addr: SocketAddr = draft.addr.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+        if addr.ip().is_unspecified() || addr.port() == 0 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        candidates.push(P2pCandidate {
+            kind: draft.kind,
+            addr: addr.to_string(),
+            updated_unix: now,
+            expires_unix: now + P2P_CANDIDATE_TTL_SECS,
+        });
+    }
+    Ok(candidates)
+}
+
+fn set_p2p_candidates(
+    db_path: Option<&Path>,
+    inner: &mut RelayState,
+    device_id: DeviceId,
+    candidates: Vec<P2pCandidate>,
+) -> Result<P2pCandidatesResponse, StatusCode> {
+    persist_p2p_candidates(db_path, device_id, &candidates).map_err(|err| {
+        tracing::error!(%err, "persist p2p candidates failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    inner.p2p_candidates.insert(device_id, candidates.clone());
+    Ok(P2pCandidatesResponse { candidates })
+}
+
+fn upsert_p2p_candidate(
+    db_path: Option<&Path>,
+    inner: &mut RelayState,
+    device_id: DeviceId,
+    candidate: P2pCandidate,
+) -> Result<(), StatusCode> {
+    let candidates = inner.p2p_candidates.entry(device_id).or_default();
+    candidates.retain(|existing| {
+        existing.expires_unix >= candidate.updated_unix
+            && !(existing.kind == candidate.kind && existing.addr == candidate.addr)
+    });
+    candidates.push(candidate);
+    prune_p2p_candidate_list(candidates);
+    persist_p2p_candidates(db_path, device_id, candidates).map_err(|err| {
+        tracing::error!(%err, "persist p2p candidate failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+fn retain_live_observed_candidates(
+    inner: &RelayState,
+    device_id: DeviceId,
+    candidates: &mut Vec<P2pCandidate>,
+) {
+    let now = now_unix();
+    if let Some(existing) = inner.p2p_candidates.get(&device_id) {
+        for candidate in existing {
+            if candidate.kind != P2pCandidateKind::ServerReflexive || candidate.expires_unix < now {
+                continue;
+            }
+            if candidates
+                .iter()
+                .any(|item| item.kind == candidate.kind && item.addr == candidate.addr)
+            {
+                continue;
+            }
+            candidates.push(candidate.clone());
+        }
+    }
+    prune_p2p_candidate_list(candidates);
+}
+
+fn prune_p2p_candidate_list(candidates: &mut Vec<P2pCandidate>) {
+    let now = now_unix();
+    candidates.retain(|candidate| candidate.expires_unix >= now);
+    candidates.sort_by(|left, right| right.updated_unix.cmp(&left.updated_unix));
+    candidates.truncate(8);
+}
+
+fn live_p2p_candidates(inner: &mut RelayState, device_id: DeviceId) -> Vec<P2pCandidate> {
+    let now = now_unix();
+    let candidates = inner.p2p_candidates.entry(device_id).or_default();
+    candidates.retain(|candidate| candidate.expires_unix >= now);
+    candidates.clone()
+}
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -573,10 +842,22 @@ fn init_relay_db(path: &Path) -> rusqlite::Result<()> {
             at_unix INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_receipts_device ON receipts(to_device_id, at_unix);
+        CREATE TABLE IF NOT EXISTS p2p_candidates (
+            device_id TEXT NOT NULL,
+            addr TEXT NOT NULL,
+            candidate_json TEXT NOT NULL,
+            expires_unix INTEGER NOT NULL,
+            PRIMARY KEY(device_id, addr)
+        );
+        CREATE INDEX IF NOT EXISTS idx_p2p_candidates_device ON p2p_candidates(device_id, expires_unix);
         "#,
     )?;
     conn.execute(
         "DELETE FROM messages WHERE expires_unix IS NOT NULL AND expires_unix < ?1",
+        params![now_unix() as i64],
+    )?;
+    conn.execute(
+        "DELETE FROM p2p_candidates WHERE expires_unix < ?1",
         params![now_unix() as i64],
     )?;
     Ok(())
@@ -627,6 +908,23 @@ fn load_relay_state(path: &Path) -> rusqlite::Result<RelayState> {
             .entry(device_id)
             .or_default()
             .push_back(receipt);
+    }
+
+    let now = now_unix() as i64;
+    let mut p2p_candidates = conn
+        .prepare("SELECT device_id, candidate_json FROM p2p_candidates WHERE expires_unix >= ?1")?;
+    let rows = p2p_candidates.query_map(params![now], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (device_id, json) = row?;
+        let device_id = parse_uuid(&device_id)?;
+        let candidate: P2pCandidate = parse_json(&json)?;
+        state
+            .p2p_candidates
+            .entry(device_id)
+            .or_default()
+            .push(candidate);
     }
 
     Ok(state)
@@ -701,6 +999,36 @@ fn persist_receipt(
             receipt.at_unix as i64
         ],
     )?;
+    Ok(())
+}
+
+fn persist_p2p_candidates(
+    db_path: Option<&Path>,
+    device_id: DeviceId,
+    candidates: &[P2pCandidate],
+) -> rusqlite::Result<()> {
+    let Some(path) = db_path else {
+        return Ok(());
+    };
+    let mut conn = Connection::open(path)?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM p2p_candidates WHERE device_id = ?1",
+        params![device_id.to_string()],
+    )?;
+    for candidate in candidates {
+        tx.execute(
+            "INSERT INTO p2p_candidates(device_id, addr, candidate_json, expires_unix)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                device_id.to_string(),
+                &candidate.addr,
+                to_json(candidate)?,
+                candidate.expires_unix as i64
+            ],
+        )?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -935,6 +1263,84 @@ mod tests {
             drain_messages_inner(&state, drain).await.unwrap_err(),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    #[tokio::test]
+    async fn p2p_candidates_require_signed_registered_device() {
+        let keys = DeviceKeyMaterial::generate(1);
+        let state = AppState::memory();
+        let mut register_request = RegisterRequest {
+            bundle: keys.pre_key_bundle(),
+            auth: None,
+        };
+        register_request.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                &keys,
+                "register_device",
+                &register_request,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        register_device_inner(&state, register_request)
+            .await
+            .unwrap();
+
+        let unsigned = secure_chat_core::PublishP2pCandidatesRequest {
+            account_id: keys.account_id,
+            device_id: keys.device_id,
+            candidates: vec![secure_chat_core::P2pCandidateDraft {
+                kind: secure_chat_core::P2pCandidateKind::Host,
+                addr: "127.0.0.1:40000".to_string(),
+            }],
+            auth: None,
+        };
+        assert_eq!(
+            publish_p2p_candidates_inner(&state, unsigned)
+                .await
+                .unwrap_err(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let mut signed = secure_chat_core::PublishP2pCandidatesRequest {
+            account_id: keys.account_id,
+            device_id: keys.device_id,
+            candidates: vec![secure_chat_core::P2pCandidateDraft {
+                kind: secure_chat_core::P2pCandidateKind::Host,
+                addr: "127.0.0.1:40000".to_string(),
+            }],
+            auth: None,
+        };
+        signed.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                &keys,
+                "publish_p2p_candidates",
+                &signed,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        publish_p2p_candidates_inner(&state, signed).await.unwrap();
+
+        let mut list = secure_chat_core::ListP2pCandidatesRequest {
+            requester_account_id: keys.account_id,
+            requester_device_id: keys.device_id,
+            target_account_id: keys.account_id,
+            target_device_id: keys.device_id,
+            auth: None,
+        };
+        list.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                &keys,
+                "list_p2p_candidates",
+                &list,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        let response = list_p2p_candidates_inner(&state, list).await.unwrap();
+        assert_eq!(response.candidates.len(), 1);
+        assert_eq!(response.candidates[0].addr, "127.0.0.1:40000");
     }
 
     fn signed_drain(keys: &DeviceKeyMaterial, action: &str) -> DrainRequest {

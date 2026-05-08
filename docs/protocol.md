@@ -88,10 +88,31 @@ The relay exposes both HTTP(S) and QUIC command transports:
 - QUIC: Quinn bidirectional streams carrying the same `RelayCommand` and
   `RelayCommandResponse` JSON command model over TLS 1.3, with ALPN
   `secure-chat-relay/1`.
+- P2P rendezvous: a signed UDP probe endpoint on `3478/udp` records the
+  server-reflexive address observed by the relay. Candidate publication and
+  lookup are also available over the signed HTTP(S)/QUIC command API.
 
 HTTP(S) and QUIC listeners share the same `AppState`, so a device can register
 over HTTPS and drain over QUIC, or the reverse. Transport-layer TLS protects the
 network path, but it never replaces the E2EE message layer.
+
+## P2P NAT Traversal Flow
+
+P2P uses the relay only as a rendezvous and fallback server:
+
+1. Each device registers its signed pre-key bundle with the relay.
+2. The device sends a signed `P2pProbeRequest` over UDP to the relay rendezvous
+   socket. The relay verifies the device signature and records the source
+   address it observed as a short-lived server-reflexive candidate.
+3. Peers query each other's P2P candidates with signed relay commands.
+4. Clients send simultaneous signed UDP punch packets to the candidate
+   addresses. Direct packets use `P2pDirectDatagram`, which binds sender,
+   receiver, timestamp, nonce, and payload hash to the sender device signing key.
+5. If direct P2P succeeds, the encrypted transport frame can use the direct UDP
+   path. If it fails or expires, the client keeps using relay-backed delivery.
+
+The relay never accepts unauthenticated candidate updates, and candidates expire
+quickly so stale NAT mappings are not reused for long.
 
 ## Relay-Backed Delivery Flow
 
@@ -140,6 +161,7 @@ SQLite stores:
 - signed public device pre-key bundles
 - offline ciphertext queues
 - delivery/read receipt queues
+- short-lived P2P candidate records
 
 Expired ciphertext rows are deleted during startup and drain. Drained messages
 and receipts are removed from SQLite after delivery. The database contains no

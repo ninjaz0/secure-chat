@@ -71,6 +71,20 @@ pub extern "C" fn secure_chat_relay_smoke_json() -> *mut c_char {
 }
 
 #[no_mangle]
+pub extern "C" fn secure_chat_p2p_smoke_json() -> *mut c_char {
+    let value = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => match runtime.block_on(secure_chat_client::run_p2p_smoke()) {
+            Ok(report) => {
+                serde_json::to_value(report).unwrap_or_else(|err| error_json(err.to_string()))
+            }
+            Err(err) => error_json(err.to_string()),
+        },
+        Err(err) => error_json(err.to_string()),
+    };
+    json_to_c_string(value)
+}
+
+#[no_mangle]
 pub extern "C" fn secure_chat_app_snapshot_json(data_dir: *const c_char) -> *mut c_char {
     json_to_c_string(match c_arg(data_dir, "data_dir") {
         Ok(data_dir) => match secure_chat_desktop::DesktopRuntime::open(data_dir)
@@ -250,6 +264,19 @@ pub extern "C" fn secure_chat_app_receive_json(data_dir: *const c_char) -> *mut 
         Ok(data_dir) => desktop_async(|runtime| {
             runtime
                 .block_on(secure_chat_desktop::DesktopRuntime::receive(data_dir))
+                .map(to_value)
+                .unwrap_or_else(|err| error_json(err.to_string()))
+        }),
+        Err(err) => error_json(err),
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn secure_chat_app_p2p_probe_json(data_dir: *const c_char) -> *mut c_char {
+    json_to_c_string(match c_arg(data_dir, "data_dir") {
+        Ok(data_dir) => desktop_async(|runtime| {
+            runtime
+                .block_on(secure_chat_desktop::DesktopRuntime::p2p_probe(data_dir))
                 .map(to_value)
                 .unwrap_or_else(|err| error_json(err.to_string()))
         }),

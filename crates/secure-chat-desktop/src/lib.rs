@@ -432,6 +432,15 @@ impl DesktopRuntime {
         })
     }
 
+    pub async fn p2p_probe(
+        data_dir: impl AsRef<Path>,
+    ) -> Result<secure_chat_client::P2pProbeReport, DesktopError> {
+        let runtime = Self::open(data_dir)?;
+        let profile = runtime.ensure_profile()?;
+        let keys = runtime.load_device_keys()?;
+        Ok(secure_chat_client::run_p2p_probe_against(&profile.relay_url, &keys).await?)
+    }
+
     async fn bootstrap_profile(
         &self,
         display_name: &str,
