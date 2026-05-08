@@ -19,7 +19,9 @@ struct SecureChatMacApp: App {
                 .environmentObject(store)
                 .frame(minWidth: 1080, minHeight: 700)
                 .task {
-                    NotificationService.requestAuthorization()
+                    if store.notifyOnNewMessages {
+                        NotificationService.requestAuthorization()
+                    }
                     await store.loadAppSnapshot()
                 }
         }

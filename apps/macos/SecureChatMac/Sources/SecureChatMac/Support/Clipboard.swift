@@ -6,5 +6,8 @@ enum Clipboard {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
     }
-}
 
+    static func readString() -> String? {
+        NSPasteboard.general.string(forType: .string)
+    }
+}

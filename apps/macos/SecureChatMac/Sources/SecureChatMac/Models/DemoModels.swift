@@ -115,6 +115,19 @@ struct InviteResponse: Decodable {
     let inviteUri: String
 }
 
+struct InvitePreview: Decodable, Equatable {
+    let normalizedInviteUri: String
+    let suggestedDisplayName: String
+    let accountId: String
+    let deviceId: String
+    let relayHint: String?
+    let expiresUnix: UInt64?
+    let safetyNumber: String
+    let alreadyAdded: Bool
+    let existingDisplayName: String?
+    let verified: Bool
+}
+
 struct ReceiveReport: Decodable {
     let receivedCount: Int
     let snapshot: AppSnapshot

@@ -153,6 +153,32 @@ pub extern "C" fn secure_chat_app_invite_json(data_dir: *const c_char) -> *mut c
 }
 
 #[no_mangle]
+pub extern "C" fn secure_chat_app_preview_invite_json(
+    data_dir: *const c_char,
+    invite_text: *const c_char,
+) -> *mut c_char {
+    json_to_c_string(
+        match (
+            c_arg(data_dir, "data_dir"),
+            c_arg(invite_text, "invite_text"),
+        ) {
+            (Ok(data_dir), Ok(invite_text)) => {
+                match secure_chat_desktop::DesktopRuntime::preview_invite(data_dir, &invite_text) {
+                    Ok(preview) => to_value(preview),
+                    Err(err) => error_json(err.to_string()),
+                }
+            }
+            (data_dir, invite_text) => error_json(
+                data_dir
+                    .err()
+                    .or_else(|| invite_text.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        },
+    )
+}
+
+#[no_mangle]
 pub extern "C" fn secure_chat_app_add_contact_json(
     data_dir: *const c_char,
     display_name: *const c_char,

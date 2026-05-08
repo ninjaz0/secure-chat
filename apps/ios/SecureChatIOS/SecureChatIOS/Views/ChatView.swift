@@ -17,7 +17,11 @@ struct ChatView: View {
                 ScrollView {
                     LazyVStack(spacing: 10) {
                         ForEach(messages) { message in
-                            MessageBubble(message: message)
+                            MessageBubble(
+                                message: message,
+                                showsStatus: store.showMessageStatus,
+                                showsTimestamp: store.showMessageTimestamps
+                            )
                                 .id(message.id)
                         }
                     }
@@ -44,10 +48,6 @@ struct ChatView: View {
                     Task { await store.receiveMessages() }
                 } label: {
                     Image(systemName: "tray.and.arrow.down")
-                }
-
-                Toggle(isOn: $store.autoReceiveEnabled) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
                 }
             }
         }
@@ -83,6 +83,8 @@ private struct SafetyBanner: View {
 
 private struct MessageBubble: View {
     let message: AppChatMessage
+    let showsStatus: Bool
+    let showsTimestamp: Bool
 
     private var isOutgoing: Bool {
         message.direction == .outgoing
@@ -94,9 +96,18 @@ private struct MessageBubble: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(message.body)
                     .textSelection(.enabled)
-                Text(message.status.rawValue)
+                if showsStatus || showsTimestamp {
+                    HStack(spacing: 6) {
+                        if showsStatus {
+                            Text(message.status.rawValue.capitalized)
+                        }
+                        if showsTimestamp {
+                            Text(messageTime)
+                        }
+                    }
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -107,6 +118,18 @@ private struct MessageBubble: View {
             if !isOutgoing { Spacer(minLength: 44) }
         }
     }
+
+    private var messageTime: String {
+        let unix = message.receivedAtUnix ?? message.sentAtUnix
+        return Self.timeFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(unix)))
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter
+    }()
 }
 
 private struct ComposerView: View {

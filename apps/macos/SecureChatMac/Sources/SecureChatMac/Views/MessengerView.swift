@@ -4,7 +4,6 @@ struct MessengerView: View {
     @EnvironmentObject private var store: SecureChatStore
     @State private var showingInvite = false
     @State private var showingAddContact = false
-    @State private var showingSettings = false
 
     var body: some View {
         NavigationSplitView {
@@ -36,18 +35,10 @@ struct MessengerView: View {
                 .help("Pull encrypted messages from relay")
                 .disabled(store.isLoading)
 
-                Toggle(isOn: $store.autoReceiveEnabled) {
-                    Label("Auto", systemImage: "arrow.triangle.2.circlepath")
+                SettingsLink {
+                    Label("Settings", systemImage: "gearshape")
                 }
-                .toggleStyle(.switch)
-                .help("Automatically receive messages")
-
-                Button {
-                    showingSettings = true
-                } label: {
-                    Label("Relay", systemImage: "network")
-                }
-                .help("Relay settings")
+                .help("Settings")
             }
         }
         .sheet(isPresented: $showingInvite) {
@@ -56,10 +47,6 @@ struct MessengerView: View {
         }
         .sheet(isPresented: $showingAddContact) {
             AddContactSheet()
-                .environmentObject(store)
-        }
-        .sheet(isPresented: $showingSettings) {
-            RelaySettingsSheet()
                 .environmentObject(store)
         }
         .task {
@@ -109,7 +96,11 @@ private struct ChatConversationView: View {
                 ScrollView {
                     LazyVStack(spacing: 10) {
                         ForEach(store.selectedMessages) { message in
-                            MessageBubble(message: message)
+                            MessageBubble(
+                                message: message,
+                                showsStatus: store.showMessageStatus,
+                                showsTimestamp: store.showMessageTimestamps
+                            )
                         }
                     }
                     .padding(16)
@@ -160,6 +151,8 @@ private struct ChatHeaderView: View {
 
 private struct MessageBubble: View {
     let message: AppChatMessage
+    let showsStatus: Bool
+    let showsTimestamp: Bool
 
     var isOutgoing: Bool { message.direction == .outgoing }
 
@@ -169,9 +162,18 @@ private struct MessageBubble: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(message.body)
                     .textSelection(.enabled)
-                Text(message.status.rawValue)
+                if showsStatus || showsTimestamp {
+                    HStack(spacing: 6) {
+                        if showsStatus {
+                            Text(message.status.rawValue.capitalized)
+                        }
+                        if showsTimestamp {
+                            Text(messageTime)
+                        }
+                    }
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -179,6 +181,18 @@ private struct MessageBubble: View {
             if !isOutgoing { Spacer(minLength: 80) }
         }
     }
+
+    private var messageTime: String {
+        let unix = message.receivedAtUnix ?? message.sentAtUnix
+        return Self.timeFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(unix)))
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter
+    }()
 }
 
 private struct ComposerView: View {
@@ -233,63 +247,165 @@ private struct AddContactSheet: View {
     @EnvironmentObject private var store: SecureChatStore
     @Environment(\.dismiss) private var dismiss
     @State private var displayName = ""
-    @State private var inviteURI = ""
+    @State private var inviteText = ""
+    @State private var invitePreview: InvitePreview?
+    @State private var previewError: String?
+    @State private var isCheckingInvite = false
+    @State private var nameWasEdited = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Add Contact")
                 .font(.headline)
-            TextField("Display name", text: $displayName)
-                .textFieldStyle(.roundedBorder)
-            TextField("schat://invite/...", text: $inviteURI, axis: .vertical)
+
+            TextField("Paste schat://invite/... link", text: $inviteText, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(3...6)
+
             HStack {
-                Button("Add") {
+                Button {
+                    if let pasted = Clipboard.readString() {
+                        inviteText = pasted
+                    }
+                } label: {
+                    Label("Paste Invite", systemImage: "doc.on.clipboard")
+                }
+
+                Button {
+                    Task { await refreshInvitePreview(inviteText) }
+                } label: {
+                    Label("Verify", systemImage: "checkmark.shield")
+                }
+                .disabled(inviteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            if isCheckingInvite {
+                ProgressView()
+                    .controlSize(.small)
+            } else if let invitePreview {
+                InvitePreviewCard(preview: invitePreview)
+            } else if let previewError {
+                Label(previewError, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
+
+            TextField("Name (optional)", text: Binding(
+                get: { displayName },
+                set: { value in
+                    displayName = value
+                    nameWasEdited = true
+                }
+            ))
+            .textFieldStyle(.roundedBorder)
+
+            HStack {
+                Button(invitePreview?.alreadyAdded == true ? "Update Contact" : "Add Contact") {
                     Task {
-                        await store.addContact(displayName: displayName, inviteURI: inviteURI)
-                        dismiss()
+                        if invitePreview == nil {
+                            await refreshInvitePreview(inviteText)
+                        }
+                        guard let invitePreview else { return }
+                        let didAdd = await store.addContact(
+                            displayName: effectiveDisplayName(for: invitePreview),
+                            inviteURI: invitePreview.normalizedInviteUri
+                        )
+                        if didAdd {
+                            dismiss()
+                        }
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(displayName.isEmpty || inviteURI.isEmpty)
+                .disabled(invitePreview == nil || isCheckingInvite)
                 Spacer()
                 Button("Cancel") { dismiss() }
             }
         }
         .padding(20)
-        .frame(width: 520)
+        .frame(width: 560)
+        .task(id: inviteText) {
+            await refreshInvitePreviewWhenReady(inviteText)
+        }
+    }
+
+    private func refreshInvitePreviewWhenReady(_ text: String) async {
+        let candidate = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty else {
+            invitePreview = nil
+            previewError = nil
+            return
+        }
+        guard candidate.localizedCaseInsensitiveContains("schat://invite/") else {
+            invitePreview = nil
+            previewError = nil
+            return
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        guard text == inviteText else { return }
+        await refreshInvitePreview(text)
+    }
+
+    private func refreshInvitePreview(_ text: String) async {
+        let candidate = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty else { return }
+        isCheckingInvite = true
+        defer { isCheckingInvite = false }
+        do {
+            let preview = try await store.previewInvite(candidate)
+            invitePreview = preview
+            previewError = nil
+            if !nameWasEdited || displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                displayName = preview.suggestedDisplayName
+                nameWasEdited = false
+            }
+        } catch {
+            invitePreview = nil
+            previewError = error.localizedDescription
+        }
+    }
+
+    private func effectiveDisplayName(for preview: InvitePreview) -> String {
+        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? preview.suggestedDisplayName : trimmed
     }
 }
 
-private struct RelaySettingsSheet: View {
-    @EnvironmentObject private var store: SecureChatStore
-    @Environment(\.dismiss) private var dismiss
-    @State private var relayURL = ""
+private struct InvitePreviewCard: View {
+    let preview: InvitePreview
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Relay")
-                .font(.headline)
-            TextField("Relay URL", text: $relayURL)
-                .textFieldStyle(.roundedBorder)
-                .onAppear {
-                    relayURL = store.appSnapshot?.profile?.relayUrl ?? "http://127.0.0.1:8787"
-                }
-            HStack {
-                Button("Save") {
-                    Task {
-                        await store.updateRelay(relayURL)
-                        dismiss()
-                    }
-                }
-                .keyboardShortcut(.defaultAction)
-                Spacer()
-                Button("Cancel") { dismiss() }
+        VStack(alignment: .leading, spacing: 8) {
+            Label(
+                preview.alreadyAdded ? "Already in contacts" : "Invite verified",
+                systemImage: preview.alreadyAdded ? "person.crop.circle.badge.checkmark" : "checkmark.shield.fill"
+            )
+            .font(.headline)
+            .foregroundStyle(preview.alreadyAdded ? Color.secondary : Color.green)
+
+            Text(preview.suggestedDisplayName)
+                .font(.callout.weight(.semibold))
+                .lineLimit(1)
+
+            Text("Device \(shortDevice(preview.deviceId))")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let relayHint = preview.relayHint, !relayHint.isEmpty {
+                Text(relayHint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
+
+            Text(preview.safetyNumber)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .lineLimit(2)
         }
-        .padding(20)
-        .frame(width: 460)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

@@ -42,6 +42,14 @@ pub enum DesktopError {
     ContactNotFound,
     #[error("invalid local data: {0}")]
     InvalidData(String),
+    #[error("invite link is invalid or incomplete")]
+    InvalidInvite,
+    #[error("invite link has expired")]
+    ExpiredInvite,
+    #[error("this invite link belongs to your current device")]
+    SelfInvite,
+    #[error("contact name cannot be empty")]
+    EmptyContactName,
     #[error("message body cannot be empty")]
     EmptyMessage,
 }
@@ -147,6 +155,20 @@ pub struct InviteResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InvitePreview {
+    pub normalized_invite_uri: String,
+    pub suggested_display_name: String,
+    pub account_id: String,
+    pub device_id: String,
+    pub relay_hint: Option<String>,
+    pub expires_unix: Option<u64>,
+    pub safety_number: String,
+    pub already_added: bool,
+    pub existing_display_name: Option<String>,
+    pub verified: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReceiveReport {
     pub received_count: usize,
     pub snapshot: AppSnapshot,
@@ -243,6 +265,15 @@ impl DesktopRuntime {
         })
     }
 
+    pub fn preview_invite(
+        data_dir: impl AsRef<Path>,
+        invite_text: &str,
+    ) -> Result<InvitePreview, DesktopError> {
+        let runtime = Self::open(data_dir)?;
+        runtime.ensure_profile()?;
+        runtime.preview_invite_inner(invite_text)
+    }
+
     pub fn add_contact(
         data_dir: impl AsRef<Path>,
         display_name: &str,
@@ -250,7 +281,14 @@ impl DesktopRuntime {
     ) -> Result<AppSnapshot, DesktopError> {
         let runtime = Self::open(data_dir)?;
         runtime.ensure_profile()?;
-        runtime.add_contact_inner(display_name, invite_uri)?;
+        let preview = runtime.preview_invite_inner(invite_uri)?;
+        let display_name = display_name.trim();
+        let display_name = if display_name.is_empty() {
+            preview.suggested_display_name.as_str()
+        } else {
+            display_name
+        };
+        runtime.add_contact_inner(display_name, &preview.normalized_invite_uri)?;
         runtime.snapshot()
     }
 
@@ -522,8 +560,12 @@ impl DesktopRuntime {
         invite_uri: &str,
     ) -> Result<ContactRecord, DesktopError> {
         let keys = self.load_device_keys()?;
-        let invite = Invite::from_uri(invite_uri)?;
-        invite.bundle.verify()?;
+        let display_name = display_name.trim();
+        if display_name.is_empty() {
+            return Err(DesktopError::EmptyContactName);
+        }
+        let (invite_uri, invite) = decode_invite(invite_uri)?;
+        validate_invite_for_local_device(&invite, &keys)?;
         let remote = invite.bundle.identity.clone();
         let safety = safety_number(&[keys.public_identity()], std::slice::from_ref(&remote));
         let id = Uuid::new_v4().to_string();
@@ -553,6 +595,43 @@ impl DesktopRuntime {
         )?;
         self.contact_by_device(&remote.device_id.to_string())?
             .ok_or(DesktopError::ContactNotFound)
+    }
+
+    fn preview_invite_inner(&self, invite_text: &str) -> Result<InvitePreview, DesktopError> {
+        let keys = self.load_device_keys()?;
+        let (normalized_invite_uri, invite) = decode_invite(invite_text)?;
+        validate_invite_for_local_device(&invite, &keys)?;
+        let remote = invite.bundle.identity.clone();
+        let existing = self.contact_by_device(&remote.device_id.to_string())?;
+        let safety = safety_number(&[keys.public_identity()], std::slice::from_ref(&remote));
+        let short_device = remote
+            .device_id
+            .to_string()
+            .chars()
+            .take(8)
+            .collect::<String>();
+        let suggested_display_name = existing
+            .as_ref()
+            .map(|contact| contact.display_name.clone())
+            .unwrap_or_else(|| format!("Contact {short_device}"));
+
+        Ok(InvitePreview {
+            normalized_invite_uri,
+            suggested_display_name,
+            account_id: remote.account_id.to_string(),
+            device_id: remote.device_id.to_string(),
+            relay_hint: invite.relay_hint,
+            expires_unix: invite.expires_unix,
+            safety_number: safety.number,
+            already_added: existing.is_some(),
+            existing_display_name: existing
+                .as_ref()
+                .map(|contact| contact.display_name.clone()),
+            verified: existing
+                .as_ref()
+                .map(|contact| contact.verified)
+                .unwrap_or(false),
+        })
     }
 
     fn create_incoming_contact(
@@ -925,9 +1004,72 @@ fn padded_bucket(payload_len: usize) -> usize {
     needed.div_ceil(BUCKET) * BUCKET
 }
 
+fn decode_invite(input: &str) -> Result<(String, Invite), DesktopError> {
+    let normalized = extract_invite_uri(input)?;
+    let invite = Invite::from_uri(&normalized).map_err(|_| DesktopError::InvalidInvite)?;
+    invite
+        .bundle
+        .verify()
+        .map_err(|_| DesktopError::InvalidInvite)?;
+    Ok((normalized, invite))
+}
+
+fn extract_invite_uri(input: &str) -> Result<String, DesktopError> {
+    let trimmed = input.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let prefix = "schat://invite/";
+    let start = lower.find(prefix).ok_or(DesktopError::InvalidInvite)?;
+    let payload_start = start + prefix.len();
+    let payload = trimmed[payload_start..]
+        .chars()
+        .take_while(|character| {
+            character.is_ascii_alphanumeric() || *character == '-' || *character == '_'
+        })
+        .collect::<String>();
+    if payload.is_empty() {
+        return Err(DesktopError::InvalidInvite);
+    }
+    Ok(format!("{prefix}{payload}"))
+}
+
+fn validate_invite_for_local_device(
+    invite: &Invite,
+    keys: &DeviceKeyMaterial,
+) -> Result<(), DesktopError> {
+    if let Some(expires_unix) = invite.expires_unix {
+        if expires_unix <= now_unix() {
+            return Err(DesktopError::ExpiredInvite);
+        }
+    }
+    if invite.bundle.identity.device_id == keys.device_id {
+        return Err(DesktopError::SelfInvite);
+    }
+    Ok(())
+}
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_invite_uri_accepts_surrounding_text() {
+        let input = "Alice invite: schat://invite/abc_DEF-123. Please add me.";
+        let normalized = extract_invite_uri(input).unwrap();
+        assert_eq!(normalized, "schat://invite/abc_DEF-123");
+    }
+
+    #[test]
+    fn extract_invite_uri_rejects_missing_payload() {
+        assert!(matches!(
+            extract_invite_uri("schat://invite/"),
+            Err(DesktopError::InvalidInvite)
+        ));
+    }
 }

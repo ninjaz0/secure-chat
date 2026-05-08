@@ -62,6 +62,18 @@ enum SecureChatCoreClient {
         }
     }
 
+    static func previewInvite(_ inviteText: String) throws -> InvitePreview {
+        let dataDir = appDataDirectory
+        return try dataDir.withCString { dataDirPtr in
+            try inviteText.withCString { invitePtr in
+                try decodeCString(
+                    secure_chat_app_preview_invite_json(dataDirPtr, invitePtr),
+                    as: InvitePreview.self
+                )
+            }
+        }
+    }
+
     static func addContact(displayName: String, inviteURI: String) throws -> AppSnapshot {
         let dataDir = appDataDirectory
         return try dataDir.withCString { dataDirPtr in

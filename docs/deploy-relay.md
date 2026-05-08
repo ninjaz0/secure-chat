@@ -19,7 +19,53 @@ relay operations are authenticated with per-device Ed25519 request signatures.
   - `443/udp` for QUIC relay traffic
 - at least 1 vCPU, 1 GB RAM, and persistent disk for `/var/lib/secure-chat`
 
-## Recommended Systemd Deployment
+## One-Command Systemd Deployment
+
+For a fresh Ubuntu server, the recommended path is the installer script. It
+installs packages, installs Rust when needed, builds the relay, creates the
+`securechat` service user, issues a Let's Encrypt certificate, writes the
+systemd/env files, opens firewall ports, installs a renewal hook, and installs
+the server management command:
+
+```bash
+git clone https://github.com/ninjaz0/secure-chat.git
+cd secure-chat
+./deploy/install-relay.sh --domain chat.example.com --email you@example.com
+```
+
+After deployment, open the maintenance menu on the server with:
+
+```bash
+chatrelay
+```
+
+Direct maintenance commands are also available:
+
+```bash
+chatrelay status
+chatrelay logs
+chatrelay restart
+chatrelay health
+chatrelay backup
+chatrelay update
+chatrelay renew
+```
+
+Use these client URLs:
+
+```text
+https://chat.example.com
+quic://chat.example.com:443
+```
+
+If certificates already exist at `/etc/secure-chat/tls/fullchain.pem` and
+`/etc/secure-chat/tls/privkey.pem`, use:
+
+```bash
+./deploy/install-relay.sh --domain chat.example.com --skip-certbot
+```
+
+## Manual Systemd Deployment
 
 Install server packages:
 
