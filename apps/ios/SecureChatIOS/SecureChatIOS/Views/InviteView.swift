@@ -21,6 +21,13 @@ struct InviteView: View {
                     } label: {
                         Label("Copy Invite", systemImage: "doc.on.doc")
                     }
+
+                    Button {
+                        store.copyTemporaryInvite()
+                        dismiss()
+                    } label: {
+                        Label("Copy Temporary Invite", systemImage: "timer")
+                    }
                 }
             }
             .navigationTitle("My Invite")

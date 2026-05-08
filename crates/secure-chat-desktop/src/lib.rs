@@ -1,5 +1,6 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+#[cfg(not(target_os = "android"))]
 use keyring::Entry;
 use rusqlite::{params, Connection, OptionalExtension};
 use secure_chat_client::{RelayClient, RelayEnvelope};
@@ -8,9 +9,9 @@ use secure_chat_core::crypto::{
 };
 use secure_chat_core::safety::to_hex;
 use secure_chat_core::{
-    accept_session_as_responder, safety_number, start_session_as_initiator, DeviceKeyMaterial,
-    Invite, PlainMessage, RatchetSession, ReceiptKind, ReceiptRequest, SendRequest, TransportFrame,
-    TransportKind,
+    accept_session_as_responder_consuming_prekey, safety_number, start_session_as_initiator,
+    DeviceKeyMaterial, Invite, InviteMode, PlainMessage, PublicDeviceIdentity, RatchetSession,
+    ReceiptKind, ReceiptRequest, SendRequest, TransportFrame, TransportKind,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -19,8 +20,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
 
+#[cfg(not(target_os = "android"))]
 const KEYCHAIN_SERVICE: &str = "dev.local.securechat";
 const PROFILE_ID: &str = "default";
+const ENCRYPTED_TEXT_PREFIX: &str = "enc:v1:";
+const TEMP_INVITE_TTL_SECS: u64 = 15 * 60;
+const TEMP_CONNECTION_TTL_SECS: u64 = 24 * 60 * 60;
+const TEMP_MESSAGE_TTL_SECS: u64 = 10 * 60;
+const MAX_TEMP_CONNECTIONS: usize = 32;
+const MAX_TEMP_MESSAGES_PER_CONNECTION: usize = 200;
 
 #[derive(Debug, Error)]
 pub enum DesktopError {
@@ -28,8 +36,12 @@ pub enum DesktopError {
     Database(#[from] rusqlite::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[cfg(not(target_os = "android"))]
     #[error("keychain error: {0}")]
     Keychain(#[from] keyring::Error),
+    #[cfg(target_os = "android")]
+    #[error("secret store error: {0}")]
+    SecretStore(String),
     #[error("protocol error: {0}")]
     Protocol(#[from] secure_chat_core::CryptoError),
     #[error("client error: {0}")]
@@ -60,6 +72,8 @@ pub struct AppSnapshot {
     pub profile: Option<AppProfile>,
     pub contacts: Vec<ContactSummary>,
     pub messages: Vec<ChatMessageView>,
+    pub temporary_connections: Vec<TemporaryConnectionSummary>,
+    pub temporary_messages: Vec<TemporaryMessageView>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -166,11 +180,47 @@ pub struct InvitePreview {
     pub already_added: bool,
     pub existing_display_name: Option<String>,
     pub verified: bool,
+    pub temporary: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReceiveReport {
     pub received_count: usize,
+    pub snapshot: AppSnapshot,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TemporaryConnectionSummary {
+    pub id: String,
+    pub display_name: String,
+    pub account_id: String,
+    pub device_id: String,
+    pub safety_number: String,
+    pub last_message: Option<String>,
+    pub updated_at_unix: u64,
+    pub expires_unix: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TemporaryMessageView {
+    pub id: String,
+    pub connection_id: String,
+    pub direction: MessageDirection,
+    pub body: String,
+    pub status: MessageStatus,
+    pub sent_at_unix: u64,
+    pub received_at_unix: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TemporaryInviteResponse {
+    pub invite_uri: String,
+    pub expires_unix: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TemporaryStartResponse {
+    pub connection_id: String,
     pub snapshot: AppSnapshot,
 }
 
@@ -185,6 +235,22 @@ struct ContactRecord {
     verified: bool,
     remote_identity_json: String,
     updated_at_unix: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct TemporaryConnectionRecord {
+    id: String,
+    display_name: String,
+    account_id: String,
+    device_id: String,
+    invite_uri: Option<String>,
+    safety_number: String,
+    remote_identity_json: String,
+    session_nonce: Option<Vec<u8>>,
+    session_ciphertext: Option<Vec<u8>>,
+    created_at_unix: u64,
+    updated_at_unix: u64,
+    expires_unix: u64,
 }
 
 pub struct DesktopRuntime {
@@ -219,6 +285,8 @@ impl DesktopRuntime {
                 profile: None,
                 contacts: Vec::new(),
                 messages: Vec::new(),
+                temporary_connections: Vec::new(),
+                temporary_messages: Vec::new(),
             });
         };
         let keys = self.load_device_keys()?;
@@ -227,6 +295,8 @@ impl DesktopRuntime {
         let storage_key = self.load_storage_key()?;
         let contacts = self.contact_summaries(&storage_key)?;
         let messages = self.message_views(&storage_key)?;
+        let temporary_connections = self.temporary_connection_summaries(&storage_key)?;
+        let temporary_messages = self.temporary_message_views(&storage_key)?;
         Ok(AppSnapshot {
             ready: true,
             profile: Some(AppProfile {
@@ -238,6 +308,8 @@ impl DesktopRuntime {
             }),
             contacts,
             messages,
+            temporary_connections,
+            temporary_messages,
         })
     }
 
@@ -247,6 +319,8 @@ impl DesktopRuntime {
     ) -> Result<AppSnapshot, DesktopError> {
         let runtime = Self::open(data_dir)?;
         runtime.ensure_profile()?;
+        let storage_key = runtime.load_storage_key()?;
+        let relay_url = encrypt_text(&storage_key, relay_url)?;
         runtime.conn.execute(
             "UPDATE profile SET relay_url = ?1, updated_at_unix = ?2 WHERE id = ?3",
             params![relay_url, now_unix(), PROFILE_ID],
@@ -262,6 +336,24 @@ impl DesktopRuntime {
         Ok(InviteResponse {
             invite_uri: Invite::new(keys.pre_key_bundle(), Some(profile.relay_url), None)
                 .to_uri()?,
+        })
+    }
+
+    pub fn temporary_invite(
+        data_dir: impl AsRef<Path>,
+    ) -> Result<TemporaryInviteResponse, DesktopError> {
+        let runtime = Self::open(data_dir)?;
+        let profile = runtime.ensure_profile()?;
+        let keys = runtime.load_device_keys()?;
+        let expires_unix = now_unix() + TEMP_INVITE_TTL_SECS;
+        Ok(TemporaryInviteResponse {
+            invite_uri: Invite::temporary(
+                keys.pre_key_bundle(),
+                Some(profile.relay_url),
+                Some(expires_unix),
+            )
+            .to_uri()?,
+            expires_unix,
         })
     }
 
@@ -282,6 +374,9 @@ impl DesktopRuntime {
         let runtime = Self::open(data_dir)?;
         runtime.ensure_profile()?;
         let preview = runtime.preview_invite_inner(invite_uri)?;
+        if preview.temporary {
+            return Err(DesktopError::InvalidInvite);
+        }
         let display_name = display_name.trim();
         let display_name = if display_name.is_empty() {
             preview.suggested_display_name.as_str()
@@ -289,6 +384,107 @@ impl DesktopRuntime {
             display_name
         };
         runtime.add_contact_inner(display_name, &preview.normalized_invite_uri)?;
+        runtime.snapshot()
+    }
+
+    pub fn start_temporary_connection(
+        data_dir: impl AsRef<Path>,
+        invite_uri: &str,
+    ) -> Result<TemporaryStartResponse, DesktopError> {
+        let runtime = Self::open(data_dir)?;
+        runtime.ensure_profile()?;
+        let preview = runtime.preview_invite_inner(invite_uri)?;
+        if !preview.temporary {
+            return Err(DesktopError::InvalidInvite);
+        }
+        let connection =
+            runtime.create_or_update_temporary_connection(&preview.normalized_invite_uri)?;
+        Ok(TemporaryStartResponse {
+            connection_id: connection.id,
+            snapshot: runtime.snapshot()?,
+        })
+    }
+
+    pub async fn send_temporary_message(
+        data_dir: impl AsRef<Path>,
+        connection_id: &str,
+        body: &str,
+    ) -> Result<AppSnapshot, DesktopError> {
+        if body.trim().is_empty() {
+            return Err(DesktopError::EmptyMessage);
+        }
+        let runtime = Self::open(data_dir)?;
+        let profile = runtime.ensure_profile()?;
+        let keys = runtime.load_device_keys()?;
+        let storage_key = runtime.load_storage_key()?;
+        let connection = runtime
+            .temporary_connection(connection_id)?
+            .ok_or(DesktopError::ContactNotFound)?;
+        if connection.expires_unix <= now_unix() {
+            runtime.delete_temporary_connection(connection_id)?;
+            return Err(DesktopError::ExpiredInvite);
+        }
+        let relay = RelayClient::new(profile.relay_url);
+        relay.register_device(&keys).await?;
+
+        let mut session = runtime.load_temporary_session(&connection)?;
+        let initial = if session.is_some() {
+            None
+        } else if let Some(invite_uri) = &connection.invite_uri {
+            let invite = Invite::from_uri(invite_uri)?;
+            validate_invite_for_local_device(&invite, &keys)?;
+            let (initial, created_session) =
+                start_session_as_initiator(&keys, &invite.bundle, CipherSuite::default())?;
+            session = Some(created_session);
+            Some(initial)
+        } else {
+            None
+        };
+        let mut session = session.ok_or(DesktopError::ContactNotFound)?;
+        let wire = session.encrypt(PlainMessage {
+            sent_at_unix: now_unix(),
+            body: body.to_string(),
+        })?;
+        let envelope = RelayEnvelope { initial, wire };
+        let payload = serde_json::to_vec(&envelope)?;
+        let frame = TransportFrame::protect(&payload, &padding_profile(payload.len()))?;
+        let relay_ciphertext = serde_json::to_vec(&frame)?;
+        let sent = relay
+            .send(
+                &keys,
+                SendRequest {
+                    sender_account_id: Some(keys.account_id),
+                    sender_device_id: Some(keys.device_id),
+                    to_account_id: session.remote_identity.account_id,
+                    to_device_id: session.remote_identity.device_id,
+                    transport_kind: TransportKind::WebSocketTls,
+                    sealed_sender: None,
+                    ciphertext: relay_ciphertext.clone(),
+                    expires_unix: Some(now_unix() + TEMP_MESSAGE_TTL_SECS),
+                    auth: None,
+                },
+            )
+            .await?;
+        runtime.save_temporary_session(&connection.id, &session)?;
+        runtime.insert_temporary_message(
+            &connection.id,
+            MessageDirection::Outgoing,
+            body,
+            MessageStatus::Sent,
+            Some(relay_ciphertext),
+            Some(sent.id.to_string()),
+            &storage_key,
+        )?;
+        runtime.snapshot()
+    }
+
+    pub fn end_temporary_connection(
+        data_dir: impl AsRef<Path>,
+        connection_id: &str,
+    ) -> Result<AppSnapshot, DesktopError> {
+        let runtime = Self::open(data_dir)?;
+        runtime.ensure_profile()?;
+        runtime.delete_temporary_connection(connection_id)?;
         runtime.snapshot()
     }
 
@@ -367,43 +563,81 @@ impl DesktopRuntime {
     pub async fn receive(data_dir: impl AsRef<Path>) -> Result<ReceiveReport, DesktopError> {
         let runtime = Self::open(data_dir)?;
         let profile = runtime.ensure_profile()?;
-        let keys = runtime.load_device_keys()?;
+        let mut keys = runtime.load_device_keys()?;
         let storage_key = runtime.load_storage_key()?;
         let relay = RelayClient::new(&profile.relay_url);
         relay.register_device(&keys).await?;
         runtime.apply_receipts(relay.drain_receipts(&keys).await?)?;
         let queued = relay.drain(&keys).await?;
         let mut received_count = 0usize;
+        let mut keys_changed = false;
 
         for item in queued {
             let frame: TransportFrame = serde_json::from_slice(&item.ciphertext)?;
             let envelope: RelayEnvelope = serde_json::from_slice(&frame.expose()?)?;
             let remote_device_id = envelope.wire.sender_device_id;
-            let mut contact = runtime.contact_by_device(&remote_device_id.to_string())?;
-            if contact.is_none() {
-                contact = Some(runtime.create_incoming_contact(&keys, &envelope)?);
-            }
-            let contact = contact.ok_or(DesktopError::ContactNotFound)?;
-            let mut session = runtime.load_session(&contact.id)?;
+            let contact = runtime.contact_by_device(&remote_device_id.to_string())?;
+            let mut temporary_connection = if contact.is_none() {
+                runtime.temporary_connection_by_device(&remote_device_id.to_string())?
+            } else {
+                None
+            };
+            let mut session = if let Some(contact) = &contact {
+                runtime.load_session(&contact.id)?
+            } else if let Some(connection) = &temporary_connection {
+                runtime.load_temporary_session(connection)?
+            } else {
+                None
+            };
+            let new_incoming_session = session.is_none();
             if session.is_none() {
                 let initial = envelope
                     .initial
                     .as_ref()
                     .ok_or(DesktopError::ContactNotFound)?;
-                session = Some(accept_session_as_responder(&keys, initial)?);
+                let accepted = accept_session_as_responder_consuming_prekey(&mut keys, initial)?;
+                if accepted.remote_identity.device_id != remote_device_id {
+                    return Err(DesktopError::InvalidData(
+                        "initial identity does not match message sender".to_string(),
+                    ));
+                }
+                runtime.save_device_keys(&keys)?;
+                keys_changed = true;
+                session = Some(accepted);
             }
             let mut session = session.ok_or(DesktopError::ContactNotFound)?;
             let plain = session.decrypt(&envelope.wire)?;
-            runtime.save_session(&contact.id, &session)?;
-            runtime.insert_message(
-                &contact.id,
-                MessageDirection::Incoming,
-                &plain.body,
-                MessageStatus::Received,
-                Some(item.ciphertext),
-                Some(item.id.to_string()),
-                &storage_key,
-            )?;
+            if let Some(contact) = contact {
+                runtime.save_session(&contact.id, &session)?;
+                runtime.insert_message(
+                    &contact.id,
+                    MessageDirection::Incoming,
+                    &plain.body,
+                    MessageStatus::Received,
+                    Some(item.ciphertext),
+                    Some(item.id.to_string()),
+                    &storage_key,
+                )?;
+            } else {
+                if temporary_connection.is_none() && new_incoming_session {
+                    temporary_connection =
+                        Some(runtime.create_incoming_temporary_connection(
+                            &keys,
+                            &session.remote_identity,
+                        )?);
+                }
+                let connection = temporary_connection.ok_or(DesktopError::ContactNotFound)?;
+                runtime.save_temporary_session(&connection.id, &session)?;
+                runtime.insert_temporary_message(
+                    &connection.id,
+                    MessageDirection::Incoming,
+                    &plain.body,
+                    MessageStatus::Received,
+                    Some(item.ciphertext),
+                    Some(item.id.to_string()),
+                    &storage_key,
+                )?;
+            }
             if let (Some(sender_account_id), Some(sender_device_id)) =
                 (item.sender_account_id, item.sender_device_id)
             {
@@ -424,6 +658,11 @@ impl DesktopRuntime {
                     .await;
             }
             received_count += 1;
+        }
+
+        if keys_changed {
+            runtime.save_device_keys(&keys)?;
+            relay.register_device(&keys).await?;
         }
 
         Ok(ReceiveReport {
@@ -448,14 +687,18 @@ impl DesktopRuntime {
     ) -> Result<(), DesktopError> {
         if self.profile_row()?.is_none() {
             let keys = DeviceKeyMaterial::generate(16);
+            let storage_key = random_bytes::<32>();
             self.save_device_keys(&keys)?;
-            self.save_storage_key(&random_bytes::<32>())?;
+            self.save_storage_key(&storage_key)?;
+            let relay_url = encrypt_text(&storage_key, relay_url)?;
             self.conn.execute(
                 "INSERT INTO profile (id, display_name, relay_url, created_at_unix, updated_at_unix)
                  VALUES (?1, ?2, ?3, ?4, ?4)",
                 params![PROFILE_ID, display_name, relay_url, now_unix()],
             )?;
         } else {
+            let storage_key = self.load_storage_key()?;
+            let relay_url = encrypt_text(&storage_key, relay_url)?;
             self.conn.execute(
                 "UPDATE profile SET display_name = ?1, relay_url = ?2, updated_at_unix = ?3 WHERE id = ?4",
                 params![display_name, relay_url, now_unix(), PROFILE_ID],
@@ -515,9 +758,37 @@ impl DesktopRuntime {
                 sent_at_unix INTEGER NOT NULL,
                 received_at_unix INTEGER
             );
+            CREATE TABLE IF NOT EXISTS temporary_connections (
+                id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                device_id TEXT NOT NULL UNIQUE,
+                invite_uri TEXT,
+                safety_number TEXT NOT NULL,
+                remote_identity_json TEXT NOT NULL,
+                session_nonce BLOB,
+                session_ciphertext BLOB,
+                created_at_unix INTEGER NOT NULL,
+                updated_at_unix INTEGER NOT NULL,
+                expires_unix INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS temporary_messages (
+                id TEXT PRIMARY KEY,
+                connection_id TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                body_nonce BLOB NOT NULL,
+                body_ciphertext BLOB NOT NULL,
+                relay_ciphertext BLOB,
+                remote_message_id TEXT,
+                status TEXT NOT NULL,
+                sent_at_unix INTEGER NOT NULL,
+                received_at_unix INTEGER
+            );
             "#,
         )?;
         self.ensure_sessions_schema()?;
+        self.encrypt_existing_metadata_if_possible()?;
+        self.delete_expired_temporary_connections()?;
         Ok(())
     }
 
@@ -543,8 +814,75 @@ impl DesktopRuntime {
         Ok(())
     }
 
+    fn encrypt_existing_metadata_if_possible(&self) -> Result<(), DesktopError> {
+        let Ok(storage_key) = self.load_storage_key() else {
+            return Ok(());
+        };
+
+        let profile_rows = {
+            let mut statement = self
+                .conn
+                .prepare("SELECT id, relay_url FROM profile WHERE relay_url NOT LIKE ?1")?;
+            let rows = statement
+                .query_map(params![format!("{ENCRYPTED_TEXT_PREFIX}%")], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (id, relay_url) in profile_rows {
+            let encrypted = encrypt_text(&storage_key, &relay_url)?;
+            self.conn.execute(
+                "UPDATE profile SET relay_url = ?1 WHERE id = ?2",
+                params![encrypted, id],
+            )?;
+        }
+
+        let contact_rows = {
+            let mut statement = self.conn.prepare(
+                "SELECT id, invite_uri, remote_identity_json FROM contacts
+                 WHERE (invite_uri IS NOT NULL AND invite_uri NOT LIKE ?1)
+                    OR remote_identity_json NOT LIKE ?1",
+            )?;
+            let rows = statement
+                .query_map(params![format!("{ENCRYPTED_TEXT_PREFIX}%")], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (id, invite_uri, remote_identity_json) in contact_rows {
+            let encrypted_invite_uri = invite_uri
+                .as_deref()
+                .map(|value| {
+                    if is_encrypted_text(value) {
+                        Ok(value.to_string())
+                    } else {
+                        encrypt_text(&storage_key, value)
+                    }
+                })
+                .transpose()?;
+            let encrypted_remote_identity_json = if is_encrypted_text(&remote_identity_json) {
+                remote_identity_json
+            } else {
+                encrypt_text(&storage_key, &remote_identity_json)?
+            };
+            self.conn.execute(
+                "UPDATE contacts SET invite_uri = ?1, remote_identity_json = ?2 WHERE id = ?3",
+                params![encrypted_invite_uri, encrypted_remote_identity_json, id],
+            )?;
+        }
+
+        Ok(())
+    }
+
     fn profile_row(&self) -> Result<Option<ProfileRow>, DesktopError> {
-        self.conn
+        let row = self
+            .conn
             .query_row(
                 "SELECT display_name, relay_url FROM profile WHERE id = ?1",
                 params![PROFILE_ID],
@@ -555,8 +893,15 @@ impl DesktopRuntime {
                     })
                 },
             )
-            .optional()
-            .map_err(Into::into)
+            .optional()?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let storage_key = self.load_storage_key()?;
+        Ok(Some(ProfileRow {
+            display_name: row.display_name,
+            relay_url: decrypt_text_if_needed(&storage_key, &row.relay_url)?,
+        }))
     }
 
     fn ensure_profile(&self) -> Result<ProfileRow, DesktopError> {
@@ -579,7 +924,9 @@ impl DesktopRuntime {
         let safety = safety_number(&[keys.public_identity()], std::slice::from_ref(&remote));
         let id = Uuid::new_v4().to_string();
         let now = now_unix();
-        let remote_identity_json = serde_json::to_string(&remote)?;
+        let storage_key = self.load_storage_key()?;
+        let invite_uri = encrypt_text(&storage_key, &invite_uri)?;
+        let remote_identity_json = encrypt_text(&storage_key, &serde_json::to_string(&remote)?)?;
         self.conn.execute(
             "INSERT OR REPLACE INTO contacts
              (id, display_name, account_id, device_id, invite_uri, safety_number, verified, remote_identity_json, created_at_unix, updated_at_unix)
@@ -640,35 +987,87 @@ impl DesktopRuntime {
                 .as_ref()
                 .map(|contact| contact.verified)
                 .unwrap_or(false),
+            temporary: invite.mode == InviteMode::Temporary,
         })
     }
 
-    fn create_incoming_contact(
+    fn create_or_update_temporary_connection(
         &self,
-        keys: &DeviceKeyMaterial,
-        envelope: &RelayEnvelope,
-    ) -> Result<ContactRecord, DesktopError> {
-        let remote = envelope
-            .initial
-            .as_ref()
-            .ok_or(DesktopError::ContactNotFound)?
-            .initiator_identity
-            .clone();
+        invite_uri: &str,
+    ) -> Result<TemporaryConnectionRecord, DesktopError> {
+        let keys = self.load_device_keys()?;
+        let (invite_uri, invite) = decode_invite(invite_uri)?;
+        validate_invite_for_local_device(&invite, &keys)?;
+        if invite.mode != InviteMode::Temporary {
+            return Err(DesktopError::InvalidInvite);
+        }
+        let remote = invite.bundle.identity.clone();
+        let safety = safety_number(&[keys.public_identity()], std::slice::from_ref(&remote));
         let suffix = remote
             .device_id
             .to_string()
             .chars()
             .take(8)
             .collect::<String>();
-        let display_name = format!("Incoming {suffix}");
-        let safety = safety_number(&[keys.public_identity()], std::slice::from_ref(&remote));
+        let display_name = format!("Temporary {suffix}");
         let id = Uuid::new_v4().to_string();
         let now = now_unix();
-        let remote_identity_json = serde_json::to_string(&remote)?;
+        let expires_unix = invite
+            .expires_unix
+            .unwrap_or(now + TEMP_CONNECTION_TTL_SECS)
+            .min(now + TEMP_CONNECTION_TTL_SECS);
+        let storage_key = self.load_storage_key()?;
+        let invite_uri = encrypt_text(&storage_key, &invite_uri)?;
+        let remote_identity_json = encrypt_text(&storage_key, &serde_json::to_string(&remote)?)?;
         self.conn.execute(
-            "INSERT OR IGNORE INTO contacts
-             (id, display_name, account_id, device_id, invite_uri, safety_number, verified, remote_identity_json, created_at_unix, updated_at_unix)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5, 0, ?6, ?7, ?7)",
+            "INSERT OR REPLACE INTO temporary_connections
+             (id, display_name, account_id, device_id, invite_uri, safety_number, remote_identity_json, session_nonce, session_ciphertext, created_at_unix, updated_at_unix, expires_unix)
+             VALUES (
+                COALESCE((SELECT id FROM temporary_connections WHERE device_id = ?4), ?1),
+                ?2, ?3, ?4, ?5, ?6, ?7,
+                COALESCE((SELECT session_nonce FROM temporary_connections WHERE device_id = ?4), NULL),
+                COALESCE((SELECT session_ciphertext FROM temporary_connections WHERE device_id = ?4), NULL),
+                COALESCE((SELECT created_at_unix FROM temporary_connections WHERE device_id = ?4), ?8),
+                ?8, ?9
+             )",
+            params![
+                id,
+                display_name,
+                remote.account_id.to_string(),
+                remote.device_id.to_string(),
+                invite_uri,
+                safety.number,
+                remote_identity_json,
+                now,
+                expires_unix
+            ],
+        )?;
+        self.prune_temporary_connections()?;
+        self.temporary_connection_by_device(&remote.device_id.to_string())?
+            .ok_or(DesktopError::ContactNotFound)
+    }
+
+    fn create_incoming_temporary_connection(
+        &self,
+        keys: &DeviceKeyMaterial,
+        remote: &PublicDeviceIdentity,
+    ) -> Result<TemporaryConnectionRecord, DesktopError> {
+        let suffix = remote
+            .device_id
+            .to_string()
+            .chars()
+            .take(8)
+            .collect::<String>();
+        let display_name = format!("Temporary {suffix}");
+        let safety = safety_number(&[keys.public_identity()], std::slice::from_ref(remote));
+        let id = Uuid::new_v4().to_string();
+        let now = now_unix();
+        let storage_key = self.load_storage_key()?;
+        let remote_identity_json = encrypt_text(&storage_key, &serde_json::to_string(remote)?)?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO temporary_connections
+             (id, display_name, account_id, device_id, invite_uri, safety_number, remote_identity_json, session_nonce, session_ciphertext, created_at_unix, updated_at_unix, expires_unix)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, NULL, NULL, ?7, ?7, ?8)",
             params![
                 id,
                 display_name,
@@ -676,10 +1075,12 @@ impl DesktopRuntime {
                 remote.device_id.to_string(),
                 safety.number,
                 remote_identity_json,
-                now
+                now,
+                now + TEMP_CONNECTION_TTL_SECS
             ],
         )?;
-        self.contact_by_device(&remote.device_id.to_string())?
+        self.prune_temporary_connections()?;
+        self.temporary_connection_by_device(&remote.device_id.to_string())?
             .ok_or(DesktopError::ContactNotFound)
     }
 
@@ -700,7 +1101,8 @@ impl DesktopRuntime {
             "SELECT id, display_name, account_id, device_id, invite_uri, safety_number, verified, remote_identity_json, updated_at_unix
              FROM contacts {predicate}"
         );
-        self.conn
+        let row = self
+            .conn
             .query_row(&sql, params![value], |row| {
                 Ok(ContactRecord {
                     id: row.get(0)?,
@@ -714,8 +1116,73 @@ impl DesktopRuntime {
                     updated_at_unix: row.get::<_, i64>(8)? as u64,
                 })
             })
-            .optional()
-            .map_err(Into::into)
+            .optional()?;
+        let Some(mut row) = row else {
+            return Ok(None);
+        };
+        let storage_key = self.load_storage_key()?;
+        row.invite_uri = row
+            .invite_uri
+            .as_deref()
+            .map(|value| decrypt_text_if_needed(&storage_key, value))
+            .transpose()?;
+        row.remote_identity_json = decrypt_text_if_needed(&storage_key, &row.remote_identity_json)?;
+        Ok(Some(row))
+    }
+
+    fn temporary_connection(
+        &self,
+        id: &str,
+    ) -> Result<Option<TemporaryConnectionRecord>, DesktopError> {
+        self.temporary_connection_query("WHERE id = ?1", id)
+    }
+
+    fn temporary_connection_by_device(
+        &self,
+        device_id: &str,
+    ) -> Result<Option<TemporaryConnectionRecord>, DesktopError> {
+        self.temporary_connection_query("WHERE device_id = ?1", device_id)
+    }
+
+    fn temporary_connection_query(
+        &self,
+        predicate: &str,
+        value: &str,
+    ) -> Result<Option<TemporaryConnectionRecord>, DesktopError> {
+        let sql = format!(
+            "SELECT id, display_name, account_id, device_id, invite_uri, safety_number, remote_identity_json, session_nonce, session_ciphertext, created_at_unix, updated_at_unix, expires_unix
+             FROM temporary_connections {predicate}"
+        );
+        let row = self
+            .conn
+            .query_row(&sql, params![value], |row| {
+                Ok(TemporaryConnectionRecord {
+                    id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    account_id: row.get(2)?,
+                    device_id: row.get(3)?,
+                    invite_uri: row.get(4)?,
+                    safety_number: row.get(5)?,
+                    remote_identity_json: row.get(6)?,
+                    session_nonce: row.get(7)?,
+                    session_ciphertext: row.get(8)?,
+                    created_at_unix: row.get::<_, i64>(9)? as u64,
+                    updated_at_unix: row.get::<_, i64>(10)? as u64,
+                    expires_unix: row.get::<_, i64>(11)? as u64,
+                })
+            })
+            .optional()?;
+        let Some(mut row) = row else {
+            return Ok(None);
+        };
+        let storage_key = self.load_storage_key()?;
+        row.invite_uri = row
+            .invite_uri
+            .as_deref()
+            .map(|value| decrypt_text_if_needed(&storage_key, value))
+            .transpose()?;
+        row.remote_identity_json = decrypt_text_if_needed(&storage_key, &row.remote_identity_json)?;
+        Ok(Some(row))
     }
 
     fn contact_summaries(&self, storage_key: &Key32) -> Result<Vec<ContactSummary>, DesktopError> {
@@ -743,6 +1210,39 @@ impl DesktopRuntime {
             .map(|mut contact| {
                 contact.last_message = self.last_message(&contact.id, storage_key)?;
                 Ok(contact)
+            })
+            .collect()
+    }
+
+    fn temporary_connection_summaries(
+        &self,
+        storage_key: &Key32,
+    ) -> Result<Vec<TemporaryConnectionSummary>, DesktopError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, display_name, account_id, device_id, safety_number, updated_at_unix, expires_unix
+             FROM temporary_connections ORDER BY updated_at_unix DESC, display_name ASC",
+        )?;
+        let connections = statement
+            .query_map([], |row| {
+                Ok(TemporaryConnectionSummary {
+                    id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    account_id: row.get(2)?,
+                    device_id: row.get(3)?,
+                    safety_number: row.get(4)?,
+                    last_message: None,
+                    updated_at_unix: row.get::<_, i64>(5)? as u64,
+                    expires_unix: row.get::<_, i64>(6)? as u64,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        connections
+            .into_iter()
+            .map(|mut connection| {
+                connection.last_message =
+                    self.last_temporary_message(&connection.id, storage_key)?;
+                Ok(connection)
             })
             .collect()
     }
@@ -785,6 +1285,56 @@ impl DesktopRuntime {
         rows
     }
 
+    fn temporary_message_views(
+        &self,
+        storage_key: &Key32,
+    ) -> Result<Vec<TemporaryMessageView>, DesktopError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, connection_id, direction, body_nonce, body_ciphertext, status, sent_at_unix, received_at_unix
+             FROM temporary_messages ORDER BY sent_at_unix ASC",
+        )?;
+        let rows =
+            statement
+                .query_map([], |row| {
+                    let nonce: Vec<u8> = row.get(3)?;
+                    let ciphertext: Vec<u8> = row.get(4)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        nonce,
+                        ciphertext,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                    ))
+                })?
+                .map(|result| {
+                    let (
+                        id,
+                        connection_id,
+                        direction,
+                        nonce,
+                        ciphertext,
+                        status,
+                        sent_at,
+                        received_at,
+                    ) = result?;
+                    let body = decrypt_body(storage_key, &nonce, &ciphertext)?;
+                    Ok(TemporaryMessageView {
+                        id,
+                        connection_id,
+                        direction: MessageDirection::from_str(&direction),
+                        body,
+                        status: MessageStatus::from_str(&status),
+                        sent_at_unix: sent_at as u64,
+                        received_at_unix: received_at.map(|value| value as u64),
+                    })
+                })
+                .collect();
+        rows
+    }
+
     fn last_message(
         &self,
         contact_id: &str,
@@ -795,6 +1345,23 @@ impl DesktopRuntime {
             .query_row(
                 "SELECT body_nonce, body_ciphertext FROM messages WHERE contact_id = ?1 ORDER BY sent_at_unix DESC LIMIT 1",
                 params![contact_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        row.map(|(nonce, ciphertext)| decrypt_body(storage_key, &nonce, &ciphertext))
+            .transpose()
+    }
+
+    fn last_temporary_message(
+        &self,
+        connection_id: &str,
+        storage_key: &Key32,
+    ) -> Result<Option<String>, DesktopError> {
+        let row: Option<(Vec<u8>, Vec<u8>)> = self
+            .conn
+            .query_row(
+                "SELECT body_nonce, body_ciphertext FROM temporary_messages WHERE connection_id = ?1 ORDER BY sent_at_unix DESC LIMIT 1",
+                params![connection_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -823,6 +1390,27 @@ impl DesktopRuntime {
         .transpose()
     }
 
+    fn load_temporary_session(
+        &self,
+        connection: &TemporaryConnectionRecord,
+    ) -> Result<Option<RatchetSession>, DesktopError> {
+        let (Some(nonce), Some(ciphertext)) = (
+            connection.session_nonce.as_ref(),
+            connection.session_ciphertext.as_ref(),
+        ) else {
+            return Ok(None);
+        };
+        let storage_key = self.load_storage_key()?;
+        let nonce: [u8; 12] = nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| secure_chat_core::CryptoError::InvalidInput)?;
+        let bytes = decrypt_secret(&storage_key, &nonce, ciphertext)?;
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(DesktopError::from)
+    }
+
     fn save_session(&self, contact_id: &str, session: &RatchetSession) -> Result<(), DesktopError> {
         let storage_key = self.load_storage_key()?;
         let (session_nonce, session_ciphertext) =
@@ -841,6 +1429,28 @@ impl DesktopRuntime {
         self.conn.execute(
             "UPDATE contacts SET updated_at_unix = ?1 WHERE id = ?2",
             params![now_unix(), contact_id],
+        )?;
+        Ok(())
+    }
+
+    fn save_temporary_session(
+        &self,
+        connection_id: &str,
+        session: &RatchetSession,
+    ) -> Result<(), DesktopError> {
+        let storage_key = self.load_storage_key()?;
+        let (session_nonce, session_ciphertext) =
+            encrypt_secret(&storage_key, &serde_json::to_vec(session)?)?;
+        self.conn.execute(
+            "UPDATE temporary_connections
+             SET session_nonce = ?1, session_ciphertext = ?2, updated_at_unix = ?3
+             WHERE id = ?4",
+            params![
+                session_nonce.to_vec(),
+                session_ciphertext,
+                now_unix(),
+                connection_id
+            ],
         )?;
         Ok(())
     }
@@ -885,6 +1495,110 @@ impl DesktopRuntime {
         Ok(())
     }
 
+    fn insert_temporary_message(
+        &self,
+        connection_id: &str,
+        direction: MessageDirection,
+        body: &str,
+        status: MessageStatus,
+        relay_ciphertext: Option<Vec<u8>>,
+        remote_message_id: Option<String>,
+        storage_key: &Key32,
+    ) -> Result<(), DesktopError> {
+        let (nonce, body_ciphertext) = encrypt_body(storage_key, body)?;
+        let now = now_unix();
+        self.conn.execute(
+            "INSERT INTO temporary_messages
+             (id, connection_id, direction, body_nonce, body_ciphertext, relay_ciphertext, remote_message_id, status, sent_at_unix, received_at_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                Uuid::new_v4().to_string(),
+                connection_id,
+                direction.as_str(),
+                nonce.to_vec(),
+                body_ciphertext,
+                relay_ciphertext,
+                remote_message_id,
+                status.as_str(),
+                now,
+                if direction == MessageDirection::Incoming {
+                    Some(now as i64)
+                } else {
+                    None
+                }
+            ],
+        )?;
+        self.conn.execute(
+            "UPDATE temporary_connections SET updated_at_unix = ?1 WHERE id = ?2",
+            params![now, connection_id],
+        )?;
+        self.prune_temporary_messages(connection_id)?;
+        Ok(())
+    }
+
+    fn delete_temporary_connection(&self, connection_id: &str) -> Result<(), DesktopError> {
+        self.conn.execute(
+            "DELETE FROM temporary_messages WHERE connection_id = ?1",
+            params![connection_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM temporary_connections WHERE id = ?1",
+            params![connection_id],
+        )?;
+        Ok(())
+    }
+
+    fn delete_expired_temporary_connections(&self) -> Result<(), DesktopError> {
+        let expired_ids = {
+            let mut statement = self
+                .conn
+                .prepare("SELECT id FROM temporary_connections WHERE expires_unix <= ?1")?;
+            let rows = statement
+                .query_map(params![now_unix()], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for id in expired_ids {
+            self.delete_temporary_connection(&id)?;
+        }
+        Ok(())
+    }
+
+    fn prune_temporary_connections(&self) -> Result<(), DesktopError> {
+        let stale_ids = {
+            let mut statement = self.conn.prepare(
+                "SELECT id FROM temporary_connections
+                 ORDER BY updated_at_unix DESC, created_at_unix DESC
+                 LIMIT -1 OFFSET ?1",
+            )?;
+            let rows = statement
+                .query_map(params![MAX_TEMP_CONNECTIONS as i64], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for id in stale_ids {
+            self.delete_temporary_connection(&id)?;
+        }
+        Ok(())
+    }
+
+    fn prune_temporary_messages(&self, connection_id: &str) -> Result<(), DesktopError> {
+        self.conn.execute(
+            "DELETE FROM temporary_messages
+             WHERE connection_id = ?1
+               AND id NOT IN (
+                   SELECT id FROM temporary_messages
+                   WHERE connection_id = ?1
+                   ORDER BY sent_at_unix DESC
+                   LIMIT ?2
+               )",
+            params![connection_id, MAX_TEMP_MESSAGES_PER_CONNECTION as i64],
+        )?;
+        Ok(())
+    }
+
     fn apply_receipts(
         &self,
         receipts: Vec<secure_chat_core::QueuedReceipt>,
@@ -906,23 +1620,38 @@ impl DesktopRuntime {
                     receipt.message_id.to_string()
                 ],
             )?;
+            self.conn.execute(
+                "UPDATE temporary_messages
+                 SET status = ?1, received_at_unix = COALESCE(received_at_unix, ?2)
+                 WHERE remote_message_id = ?3
+                   AND direction = 'outgoing'
+                   AND status NOT IN ('read')",
+                params![
+                    status.as_str(),
+                    receipt.at_unix as i64,
+                    receipt.message_id.to_string()
+                ],
+            )?;
         }
         Ok(())
     }
 
     fn load_device_keys(&self) -> Result<DeviceKeyMaterial, DesktopError> {
-        let json = self.keychain_entry("device_keys")?.get_password()?;
-        serde_json::from_str(&json).map_err(Into::into)
+        let json = self.load_secret("device_keys")?;
+        let mut keys: DeviceKeyMaterial = serde_json::from_str(&json)?;
+        if keys.ensure_current_signatures()? {
+            self.save_device_keys(&keys)?;
+        }
+        Ok(keys)
     }
 
     fn save_device_keys(&self, keys: &DeviceKeyMaterial) -> Result<(), DesktopError> {
-        self.keychain_entry("device_keys")?
-            .set_password(&serde_json::to_string(keys)?)?;
+        self.save_secret("device_keys", &serde_json::to_string(keys)?)?;
         Ok(())
     }
 
     fn load_storage_key(&self) -> Result<Key32, DesktopError> {
-        let text = self.keychain_entry("storage_key")?.get_password()?;
+        let text = self.load_secret("storage_key")?;
         let bytes = STANDARD
             .decode(text)
             .map_err(|err| DesktopError::InvalidData(err.to_string()))?;
@@ -932,11 +1661,60 @@ impl DesktopRuntime {
     }
 
     fn save_storage_key(&self, key: &Key32) -> Result<(), DesktopError> {
-        self.keychain_entry("storage_key")?
-            .set_password(&STANDARD.encode(key))?;
+        self.save_secret("storage_key", &STANDARD.encode(key))?;
         Ok(())
     }
 
+    #[cfg(not(target_os = "android"))]
+    fn load_secret(&self, kind: &str) -> Result<String, DesktopError> {
+        Ok(self.keychain_entry(kind)?.get_password()?)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn save_secret(&self, kind: &str, value: &str) -> Result<(), DesktopError> {
+        self.keychain_entry(kind)?.set_password(value)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "android")]
+    fn load_secret(&self, kind: &str) -> Result<String, DesktopError> {
+        fs::read_to_string(self.secret_store_path(kind))
+            .map(|value| value.trim_end_matches('\n').to_string())
+            .map_err(|err| DesktopError::SecretStore(err.to_string()))
+    }
+
+    #[cfg(target_os = "android")]
+    fn save_secret(&self, kind: &str, value: &str) -> Result<(), DesktopError> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = self.secret_store_path(kind);
+        let parent = path
+            .parent()
+            .ok_or_else(|| DesktopError::SecretStore("invalid secret path".to_string()))?;
+        fs::create_dir_all(parent)?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(value.as_bytes())?;
+        file.sync_all()?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "android")]
+    fn secret_store_path(&self, kind: &str) -> PathBuf {
+        self.data_dir
+            .join("secrets")
+            .join(self.keychain_scope())
+            .join(format!("{kind}.secret"))
+    }
+
+    #[cfg(not(target_os = "android"))]
     fn keychain_entry(&self, kind: &str) -> Result<Entry, keyring::Error> {
         Entry::new(
             KEYCHAIN_SERVICE,
@@ -972,6 +1750,42 @@ fn encrypt_secret(
         b"secure-chat-v1/local-message",
     )?;
     Ok((nonce, ciphertext))
+}
+
+fn encrypt_text(storage_key: &Key32, plaintext: &str) -> Result<String, DesktopError> {
+    let (nonce, ciphertext) = encrypt_secret(storage_key, plaintext.as_bytes())?;
+    Ok(format!(
+        "{ENCRYPTED_TEXT_PREFIX}{}:{}",
+        STANDARD.encode(nonce),
+        STANDARD.encode(ciphertext)
+    ))
+}
+
+fn is_encrypted_text(value: &str) -> bool {
+    value.starts_with(ENCRYPTED_TEXT_PREFIX)
+}
+
+fn decrypt_text_if_needed(storage_key: &Key32, value: &str) -> Result<String, DesktopError> {
+    if !is_encrypted_text(value) {
+        return Ok(value.to_string());
+    }
+    let encoded = value
+        .strip_prefix(ENCRYPTED_TEXT_PREFIX)
+        .ok_or_else(|| DesktopError::InvalidData("invalid encrypted text".to_string()))?;
+    let (nonce, ciphertext) = encoded
+        .split_once(':')
+        .ok_or_else(|| DesktopError::InvalidData("invalid encrypted text".to_string()))?;
+    let nonce = STANDARD
+        .decode(nonce)
+        .map_err(|err| DesktopError::InvalidData(err.to_string()))?;
+    let nonce: [u8; 12] = nonce
+        .try_into()
+        .map_err(|_| DesktopError::InvalidData("invalid encrypted text nonce".to_string()))?;
+    let ciphertext = STANDARD
+        .decode(ciphertext)
+        .map_err(|err| DesktopError::InvalidData(err.to_string()))?;
+    let plaintext = decrypt_secret(storage_key, &nonce, &ciphertext)?;
+    String::from_utf8(plaintext).map_err(|err| DesktopError::InvalidData(err.to_string()))
 }
 
 fn decrypt_body(
@@ -1016,10 +1830,7 @@ fn padded_bucket(payload_len: usize) -> usize {
 fn decode_invite(input: &str) -> Result<(String, Invite), DesktopError> {
     let normalized = extract_invite_uri(input)?;
     let invite = Invite::from_uri(&normalized).map_err(|_| DesktopError::InvalidInvite)?;
-    invite
-        .bundle
-        .verify()
-        .map_err(|_| DesktopError::InvalidInvite)?;
+    invite.verify().map_err(|_| DesktopError::InvalidInvite)?;
     Ok((normalized, invite))
 }
 
@@ -1080,5 +1891,20 @@ mod tests {
             extract_invite_uri("schat://invite/"),
             Err(DesktopError::InvalidInvite)
         ));
+    }
+
+    #[test]
+    fn encrypted_text_round_trips_and_plaintext_stays_readable() {
+        let key = random_bytes::<32>();
+        let encrypted = encrypt_text(&key, "https://relay.example").unwrap();
+        assert!(encrypted.starts_with(ENCRYPTED_TEXT_PREFIX));
+        assert_eq!(
+            decrypt_text_if_needed(&key, &encrypted).unwrap(),
+            "https://relay.example"
+        );
+        assert_eq!(
+            decrypt_text_if_needed(&key, "https://legacy.example").unwrap(),
+            "https://legacy.example"
+        );
     }
 }

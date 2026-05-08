@@ -69,6 +69,13 @@ enum SecureChatCoreClient {
         }
     }
 
+    static func temporaryInvite() throws -> TemporaryInviteResponse {
+        let dataDir = appDataDirectory
+        return try dataDir.withCString { dataDirPtr in
+            try decodeCString(secure_chat_app_temporary_invite_json(dataDirPtr), as: TemporaryInviteResponse.self)
+        }
+    }
+
     static func previewInvite(_ inviteText: String) throws -> InvitePreview {
         let dataDir = appDataDirectory
         return try dataDir.withCString { dataDirPtr in
@@ -91,6 +98,44 @@ enum SecureChatCoreClient {
                         as: AppSnapshot.self
                     )
                 }
+            }
+        }
+    }
+
+    static func startTemporaryConnection(inviteURI: String) throws -> TemporaryStartResponse {
+        let dataDir = appDataDirectory
+        return try dataDir.withCString { dataDirPtr in
+            try inviteURI.withCString { invitePtr in
+                try decodeCString(
+                    secure_chat_app_start_temporary_connection_json(dataDirPtr, invitePtr),
+                    as: TemporaryStartResponse.self
+                )
+            }
+        }
+    }
+
+    static func sendTemporaryMessage(connectionID: String, body: String) throws -> AppSnapshot {
+        let dataDir = appDataDirectory
+        return try dataDir.withCString { dataDirPtr in
+            try connectionID.withCString { connectionPtr in
+                try body.withCString { bodyPtr in
+                    try decodeCString(
+                        secure_chat_app_send_temporary_message_json(dataDirPtr, connectionPtr, bodyPtr),
+                        as: AppSnapshot.self
+                    )
+                }
+            }
+        }
+    }
+
+    static func endTemporaryConnection(connectionID: String) throws -> AppSnapshot {
+        let dataDir = appDataDirectory
+        return try dataDir.withCString { dataDirPtr in
+            try connectionID.withCString { connectionPtr in
+                try decodeCString(
+                    secure_chat_app_end_temporary_connection_json(dataDirPtr, connectionPtr),
+                    as: AppSnapshot.self
+                )
             }
         }
     }

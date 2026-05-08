@@ -1,8 +1,10 @@
+use rustls_pki_types::{pem::PemObject, CertificateDer};
 use secure_chat_core::{
-    accept_session_as_responder, start_session_as_initiator, AccountId, CipherSuite, CryptoError,
-    DeviceId, DeviceKeyMaterial, DevicePreKeyBundle, DrainReceiptsResponse, DrainRequest,
-    DrainResponse, InitialMessage, Invite, ListP2pCandidatesRequest, ObfuscationProfile,
-    P2pCandidate, P2pCandidateDraft, P2pCandidateKind, P2pCandidatesResponse, P2pDirectDatagram,
+    accept_session_as_responder_consuming_prekey, start_session_as_initiator, AccountId,
+    CipherSuite, CryptoError, DeviceId, DeviceKeyMaterial, DevicePreKeyBundle,
+    DrainReceiptsResponse, DrainRequest, DrainResponse, InitialMessage, Invite,
+    ListP2pCandidatesRequest, ObfuscationProfile, P2pCandidate, P2pCandidateDraft,
+    P2pCandidateKind, P2pCandidatesResponse, P2pDirectDatagram, P2pDirectReplayCache,
     P2pProbeRequest, P2pProbeResponse, PlainMessage, QueuedMessage, QueuedReceipt, RatchetSession,
     ReceiptRequest, RegisterRequest, RegisterResponse, RelayCommand, RelayCommandResponse,
     SendRequest, TransportFrame, TransportKind, WireMessage, P2P_RENDEZVOUS_DEFAULT_PORT,
@@ -12,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -209,17 +211,22 @@ impl RelayClient {
 pub struct RelayHttpClient {
     base_url: String,
     http: reqwest::Client,
+    insecure_error: Option<String>,
 }
 
 impl RelayHttpClient {
     pub fn new(base_url: impl Into<String>) -> Self {
+        let base_url = base_url.into().trim_end_matches('/').to_string();
+        let insecure_error = insecure_http_error(&base_url);
         Self {
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url,
             http: reqwest::Client::new(),
+            insecure_error,
         }
     }
 
     pub async fn health(&self) -> Result<serde_json::Value, ClientError> {
+        self.ensure_allowed()?;
         Ok(self
             .http
             .get(self.url("/health"))
@@ -234,6 +241,7 @@ impl RelayHttpClient {
         &self,
         request: RegisterRequest,
     ) -> Result<RegisterResponse, ClientError> {
+        self.ensure_allowed()?;
         Ok(self
             .http
             .post(self.url("/v1/accounts"))
@@ -249,6 +257,7 @@ impl RelayHttpClient {
         &self,
         account_id: AccountId,
     ) -> Result<Vec<DevicePreKeyBundle>, ClientError> {
+        self.ensure_allowed()?;
         Ok(self
             .http
             .get(self.url(&format!("/v1/accounts/{account_id}/devices")))
@@ -260,6 +269,7 @@ impl RelayHttpClient {
     }
 
     pub async fn send(&self, request: SendRequest) -> Result<QueuedMessage, ClientError> {
+        self.ensure_allowed()?;
         Ok(self
             .http
             .post(self.url("/v1/messages"))
@@ -275,6 +285,7 @@ impl RelayHttpClient {
         &self,
         request: secure_chat_core::PublishP2pCandidatesRequest,
     ) -> Result<Vec<P2pCandidate>, ClientError> {
+        self.ensure_allowed()?;
         let response: P2pCandidatesResponse = self
             .http
             .post(self.url("/v1/p2p/candidates"))
@@ -291,6 +302,7 @@ impl RelayHttpClient {
         &self,
         request: ListP2pCandidatesRequest,
     ) -> Result<Vec<P2pCandidate>, ClientError> {
+        self.ensure_allowed()?;
         let response: P2pCandidatesResponse = self
             .http
             .post(self.url("/v1/p2p/candidates/list"))
@@ -307,6 +319,7 @@ impl RelayHttpClient {
         &self,
         request: ReceiptRequest,
     ) -> Result<QueuedReceipt, ClientError> {
+        self.ensure_allowed()?;
         Ok(self
             .http
             .post(self.url("/v1/receipts"))
@@ -319,6 +332,7 @@ impl RelayHttpClient {
     }
 
     pub async fn drain(&self, request: DrainRequest) -> Result<Vec<QueuedMessage>, ClientError> {
+        self.ensure_allowed()?;
         let response: DrainResponse = self
             .http
             .post(self.url("/v1/messages/drain"))
@@ -335,6 +349,7 @@ impl RelayHttpClient {
         &self,
         request: DrainRequest,
     ) -> Result<Vec<QueuedReceipt>, ClientError> {
+        self.ensure_allowed()?;
         let response: DrainReceiptsResponse = self
             .http
             .post(self.url("/v1/receipts/drain"))
@@ -349,6 +364,13 @@ impl RelayHttpClient {
 
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
+    }
+
+    fn ensure_allowed(&self) -> Result<(), ClientError> {
+        if let Some(error) = &self.insecure_error {
+            return Err(ClientError::Transport(error.clone()));
+        }
+        Ok(())
     }
 }
 
@@ -492,7 +514,7 @@ impl SecureChatDevice {
         invite: &Invite,
         body: impl Into<String>,
     ) -> Result<QueuedMessage, ClientError> {
-        invite.bundle.verify()?;
+        invite.verify()?;
         let remote_device_id = invite.bundle.identity.device_id;
         let initial = if self.sessions.contains_key(&remote_device_id) {
             None
@@ -527,8 +549,20 @@ impl SecureChatDevice {
                     .initial
                     .as_ref()
                     .ok_or(ClientError::MissingSession(remote_device_id))?;
-                let session = accept_session_as_responder(&self.keys, initial)?;
+                let mut session =
+                    accept_session_as_responder_consuming_prekey(&mut self.keys, initial)?;
+                if session.remote_identity.device_id != remote_device_id {
+                    return Err(CryptoError::InvalidInput.into());
+                }
+                let plain = session.decrypt(&envelope.wire)?;
                 self.sessions.insert(remote_device_id, session);
+                decrypted.push(DecryptedDelivery {
+                    message_id: item.id,
+                    from_device_id: remote_device_id,
+                    body: plain.body,
+                    received_unix: item.received_unix,
+                });
+                continue;
             }
             let session = self
                 .sessions
@@ -673,6 +707,18 @@ impl P2pUdpSocket {
         let datagram = serde_json::from_slice(&buffer[..len])?;
         Ok((datagram, addr))
     }
+
+    pub async fn receive_verified_direct_datagram(
+        &self,
+        max_wait: Duration,
+        sender: &secure_chat_core::PublicDeviceIdentity,
+        receiver: &secure_chat_core::PublicDeviceIdentity,
+        replay_cache: &mut P2pDirectReplayCache,
+    ) -> Result<(P2pDirectDatagram, SocketAddr), ClientError> {
+        let (datagram, addr) = self.receive_direct_datagram(max_wait).await?;
+        datagram.verify_fresh(sender, receiver, now_unix(), replay_cache)?;
+        Ok((datagram, addr))
+    }
 }
 
 pub async fn run_p2p_probe_against(
@@ -712,7 +758,7 @@ pub async fn run_p2p_smoke_against(
 ) -> Result<P2pSmokeReport, ClientError> {
     let relay = RelayClient::new(relay_url);
     let alice = DeviceKeyMaterial::generate(4);
-    let bob = DeviceKeyMaterial::generate(4);
+    let mut bob = DeviceKeyMaterial::generate(4);
     relay.register_device(&alice).await?;
     relay.register_device(&bob).await?;
 
@@ -720,6 +766,32 @@ pub async fn run_p2p_smoke_against(
     let bob_socket = P2pUdpSocket::bind_with_rendezvous(rendezvous_addr).await?;
     let alice_candidate = alice_socket.probe(&alice).await?;
     let bob_candidate = bob_socket.probe(&bob).await?;
+    let mut link_bundle = bob.pre_key_bundle();
+    link_bundle.one_time_pre_key = None;
+    let (link_initial, mut link_session) =
+        start_session_as_initiator(&alice, &link_bundle, CipherSuite::default())?;
+    let link_wire = link_session.encrypt(PlainMessage {
+        sent_at_unix: now_unix(),
+        body: "p2p authorization link".to_string(),
+    })?;
+    let link_envelope = RelayEnvelope {
+        initial: Some(link_initial),
+        wire: link_wire,
+    };
+    let link_payload = serde_json::to_vec(&link_envelope)?;
+    let link_frame = TransportFrame::protect(&link_payload, &padding_profile(link_payload.len()))?;
+    let link_request = SendRequest {
+        sender_account_id: Some(alice.account_id),
+        sender_device_id: Some(alice.device_id),
+        to_account_id: bob.account_id,
+        to_device_id: bob.device_id,
+        transport_kind: TransportKind::QuicUdp,
+        sealed_sender: None,
+        ciphertext: serde_json::to_vec(&link_frame)?,
+        expires_unix: Some(now_unix() + 60),
+        auth: None,
+    };
+    relay.send(&alice, link_request).await?;
     let alice_saw_bob = relay
         .list_p2p_candidates(&alice, bob.account_id, bob.device_id)
         .await?;
@@ -729,7 +801,19 @@ pub async fn run_p2p_smoke_against(
 
     let bob_addr = first_candidate_addr(&alice_saw_bob)?;
     let alice_addr = first_candidate_addr(&bob_saw_alice)?;
-    let frame = TransportFrame::protect(b"hello over direct p2p", &p2p_probe_profile(21))?;
+    let (direct_initial, mut alice_session) =
+        start_session_as_initiator(&alice, &bob.pre_key_bundle(), CipherSuite::default())?;
+    let mut bob_session = accept_session_as_responder_consuming_prekey(&mut bob, &direct_initial)?;
+    let direct_wire = alice_session.encrypt(PlainMessage {
+        sent_at_unix: now_unix(),
+        body: "hello over direct p2p".to_string(),
+    })?;
+    let direct_envelope = RelayEnvelope {
+        initial: Some(direct_initial),
+        wire: direct_wire,
+    };
+    let direct_payload = serde_json::to_vec(&direct_envelope)?;
+    let frame = TransportFrame::protect(&direct_payload, &p2p_probe_profile(direct_payload.len()))?;
     let datagram = P2pDirectDatagram::sign(
         &alice,
         &bob.public_identity(),
@@ -748,13 +832,18 @@ pub async fn run_p2p_smoke_against(
             .send_direct_datagram(&datagram, bob_addr)
             .await?;
     }
+    let mut replay_cache = P2pDirectReplayCache::new();
     let (received, _) = bob_socket
-        .receive_direct_datagram(Duration::from_secs(4))
+        .receive_verified_direct_datagram(
+            Duration::from_secs(4),
+            &alice.public_identity(),
+            &bob.public_identity(),
+            &mut replay_cache,
+        )
         .await?;
-    received.verify(&alice.public_identity(), &bob.public_identity())?;
     let direct_frame: TransportFrame = serde_json::from_slice(&received.frame)?;
-    let direct_payload = String::from_utf8(direct_frame.expose()?)
-        .map_err(|err| ClientError::Transport(format!("invalid p2p payload: {err}")))?;
+    let direct_envelope: RelayEnvelope = serde_json::from_slice(&direct_frame.expose()?)?;
+    let direct_plaintext = bob_session.decrypt(&direct_envelope.wire)?;
 
     Ok(P2pSmokeReport {
         ok: true,
@@ -764,7 +853,7 @@ pub async fn run_p2p_smoke_against(
         bob_candidate,
         alice_saw_bob,
         bob_saw_alice,
-        direct_payload,
+        direct_payload: direct_plaintext.body,
     })
 }
 
@@ -920,6 +1009,39 @@ fn p2p_rendezvous_addr(relay_url: &str) -> Result<SocketAddr, ClientError> {
         .ok_or_else(|| ClientError::Transport("could not resolve p2p rendezvous".to_string()))
 }
 
+fn insecure_http_error(relay_url: &str) -> Option<String> {
+    insecure_http_error_with_override(relay_url, allow_insecure_http())
+}
+
+fn insecure_http_error_with_override(relay_url: &str, allow_insecure: bool) -> Option<String> {
+    if !relay_url.to_ascii_lowercase().starts_with("http://") {
+        return None;
+    }
+    if allow_insecure {
+        return None;
+    }
+    let host = relay_host(relay_url).ok()?;
+    if host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    {
+        return None;
+    }
+    Some(format!(
+        "refusing insecure HTTP relay URL for non-loopback host {host}; use https:// or quic://, or set SECURE_CHAT_ALLOW_INSECURE_HTTP=1 for a local test"
+    ))
+}
+
+fn allow_insecure_http() -> bool {
+    std::env::var("SECURE_CHAT_ALLOW_INSECURE_HTTP")
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn relay_host(relay_url: &str) -> Result<String, ClientError> {
     let without_scheme = relay_url
         .split_once("://")
@@ -1062,7 +1184,7 @@ fn quic_client_config() -> Result<quinn::ClientConfig, ClientError> {
             File::open(&ca_path)
                 .map_err(|err| ClientError::Transport(format!("open QUIC CA cert: {err}")))?,
         );
-        for cert in rustls_pemfile::certs(&mut reader) {
+        for cert in CertificateDer::pem_reader_iter(&mut reader) {
             roots
                 .add(cert.map_err(|err| ClientError::Transport(err.to_string()))?)
                 .map_err(|err| ClientError::Transport(err.to_string()))?;
@@ -1130,5 +1252,14 @@ mod tests {
         assert_eq!(report.direct_payload, "hello over direct p2p");
         assert!(!report.alice_saw_bob.is_empty());
         assert!(!report.bob_saw_alice.is_empty());
+    }
+
+    #[test]
+    fn insecure_http_is_limited_to_loopback_by_default() {
+        assert!(insecure_http_error_with_override("http://127.0.0.1:8787", false).is_none());
+        assert!(insecure_http_error_with_override("http://[::1]:8787", false).is_none());
+        assert!(insecure_http_error_with_override("https://203.0.113.10", false).is_none());
+        assert!(insecure_http_error_with_override("http://203.0.113.10:8787", false).is_some());
+        assert!(insecure_http_error_with_override("http://203.0.113.10:8787", true).is_none());
     }
 }

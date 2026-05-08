@@ -4,5 +4,9 @@ dist/
 apps/macos/SecureChatMac/.build/
 .DS_Store
 *.xcuserdata/
+xcuserdata/
+*.xcuserstate
 DerivedData/
-
+apps/android/SecureChatAndroid/.gradle/
+apps/android/SecureChatAndroid/app/build/
+apps/android/SecureChatAndroid/app/src/main/jniLibs/

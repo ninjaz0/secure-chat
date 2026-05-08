@@ -17,10 +17,10 @@ COPY --from=builder /src/target/release/secure-chat-relay /usr/local/bin/secure-
 USER securechat
 WORKDIR /var/lib/secure-chat
 
-ENV SECURE_CHAT_RELAY_HTTP_ADDR=0.0.0.0:8787
+ENV SECURE_CHAT_RELAY_HTTP_ADDR=127.0.0.1:8787
 ENV SECURE_CHAT_RELAY_DB=/data/relay.sqlite3
 
 VOLUME ["/data", "/certs"]
-EXPOSE 8787/tcp 443/tcp 443/udp
+EXPOSE 443/tcp 443/udp 3478/udp
 
 CMD ["secure-chat-relay"]

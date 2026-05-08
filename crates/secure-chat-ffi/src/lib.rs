@@ -1,6 +1,6 @@
 use secure_chat_core::{
-    accept_session_as_responder, safety_number, start_session_as_initiator, CipherSuite,
-    DeviceKeyMaterial, Invite, ObfuscationProfile, PlainMessage, TransportFrame,
+    accept_session_as_responder_consuming_prekey, safety_number, start_session_as_initiator,
+    CipherSuite, DeviceKeyMaterial, Invite, ObfuscationProfile, PlainMessage, TransportFrame,
 };
 use serde::Serialize;
 use std::ffi::{CStr, CString};
@@ -167,6 +167,17 @@ pub extern "C" fn secure_chat_app_invite_json(data_dir: *const c_char) -> *mut c
 }
 
 #[no_mangle]
+pub extern "C" fn secure_chat_app_temporary_invite_json(data_dir: *const c_char) -> *mut c_char {
+    json_to_c_string(match c_arg(data_dir, "data_dir") {
+        Ok(data_dir) => match secure_chat_desktop::DesktopRuntime::temporary_invite(data_dir) {
+            Ok(invite) => to_value(invite),
+            Err(err) => error_json(err.to_string()),
+        },
+        Err(err) => error_json(err),
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn secure_chat_app_preview_invite_json(
     data_dir: *const c_char,
     invite_text: *const c_char,
@@ -186,6 +197,32 @@ pub extern "C" fn secure_chat_app_preview_invite_json(
                 data_dir
                     .err()
                     .or_else(|| invite_text.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn secure_chat_app_start_temporary_connection_json(
+    data_dir: *const c_char,
+    invite_uri: *const c_char,
+) -> *mut c_char {
+    json_to_c_string(
+        match (c_arg(data_dir, "data_dir"), c_arg(invite_uri, "invite_uri")) {
+            (Ok(data_dir), Ok(invite_uri)) => {
+                match secure_chat_desktop::DesktopRuntime::start_temporary_connection(
+                    data_dir,
+                    &invite_uri,
+                ) {
+                    Ok(response) => to_value(response),
+                    Err(err) => error_json(err.to_string()),
+                }
+            }
+            (data_dir, invite_uri) => error_json(
+                data_dir
+                    .err()
+                    .or_else(|| invite_uri.err())
                     .unwrap_or_else(|| "invalid arguments".to_string()),
             ),
         },
@@ -219,6 +256,68 @@ pub extern "C" fn secure_chat_app_add_contact_json(
                     .err()
                     .or_else(|| display_name.err())
                     .or_else(|| invite_uri.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn secure_chat_app_send_temporary_message_json(
+    data_dir: *const c_char,
+    connection_id: *const c_char,
+    body: *const c_char,
+) -> *mut c_char {
+    json_to_c_string(
+        match (
+            c_arg(data_dir, "data_dir"),
+            c_arg(connection_id, "connection_id"),
+            c_arg(body, "body"),
+        ) {
+            (Ok(data_dir), Ok(connection_id), Ok(body)) => desktop_async(|runtime| {
+                runtime
+                    .block_on(secure_chat_desktop::DesktopRuntime::send_temporary_message(
+                        data_dir,
+                        &connection_id,
+                        &body,
+                    ))
+                    .map(to_value)
+                    .unwrap_or_else(|err| error_json(err.to_string()))
+            }),
+            (data_dir, connection_id, body) => error_json(
+                data_dir
+                    .err()
+                    .or_else(|| connection_id.err())
+                    .or_else(|| body.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn secure_chat_app_end_temporary_connection_json(
+    data_dir: *const c_char,
+    connection_id: *const c_char,
+) -> *mut c_char {
+    json_to_c_string(
+        match (
+            c_arg(data_dir, "data_dir"),
+            c_arg(connection_id, "connection_id"),
+        ) {
+            (Ok(data_dir), Ok(connection_id)) => {
+                match secure_chat_desktop::DesktopRuntime::end_temporary_connection(
+                    data_dir,
+                    &connection_id,
+                ) {
+                    Ok(snapshot) => to_value(snapshot),
+                    Err(err) => error_json(err.to_string()),
+                }
+            }
+            (data_dir, connection_id) => error_json(
+                data_dir
+                    .err()
+                    .or_else(|| connection_id.err())
                     .unwrap_or_else(|| "invalid arguments".to_string()),
             ),
         },
@@ -294,6 +393,415 @@ pub extern "C" fn secure_chat_free_string(ptr: *mut c_char) {
     }
 }
 
+#[cfg(target_os = "android")]
+mod android_jni {
+    use super::{desktop_async, error_json, json_to_c_string, run_protocol_checks, to_value};
+    use jni::objects::{JClass, JString};
+    use jni::sys::jstring;
+    use jni::JNIEnv;
+    use secure_chat_desktop::DesktopRuntime;
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_protocolSelfTestJson(
+        mut env: JNIEnv,
+        _class: JClass,
+    ) -> jstring {
+        let checks = run_protocol_checks();
+        json_out(
+            &mut env,
+            serde_json::json!({
+                "ok": checks.iter().all(|check| check.passed),
+                "checks": checks,
+            }),
+        )
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_relaySmokeJson(
+        mut env: JNIEnv,
+        _class: JClass,
+    ) -> jstring {
+        let value = match tokio::runtime::Runtime::new() {
+            Ok(runtime) => match runtime.block_on(secure_chat_client::run_relay_smoke()) {
+                Ok(report) => to_value(report),
+                Err(err) => error_json(err.to_string()),
+            },
+            Err(err) => error_json(err.to_string()),
+        };
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_appSnapshotJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+    ) -> jstring {
+        let value = with_1(
+            &mut env,
+            data_dir,
+            "data_dir",
+            |data_dir| match DesktopRuntime::open(data_dir).and_then(|runtime| runtime.snapshot()) {
+                Ok(snapshot) => to_value(snapshot),
+                Err(err) => error_json(err.to_string()),
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_bootstrapJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        display_name: JString,
+        relay_url: JString,
+    ) -> jstring {
+        let value = with_3(
+            &mut env,
+            data_dir,
+            "data_dir",
+            display_name,
+            "display_name",
+            relay_url,
+            "relay_url",
+            |data_dir, display_name, relay_url| {
+                desktop_async(|runtime| {
+                    runtime
+                        .block_on(DesktopRuntime::bootstrap(
+                            data_dir,
+                            &display_name,
+                            &relay_url,
+                        ))
+                        .map(to_value)
+                        .unwrap_or_else(|err| error_json(err.to_string()))
+                })
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_updateRelayJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        relay_url: JString,
+    ) -> jstring {
+        let value = with_2(
+            &mut env,
+            data_dir,
+            "data_dir",
+            relay_url,
+            "relay_url",
+            |data_dir, relay_url| {
+                desktop_async(|runtime| {
+                    runtime
+                        .block_on(DesktopRuntime::update_relay(data_dir, &relay_url))
+                        .map(to_value)
+                        .unwrap_or_else(|err| error_json(err.to_string()))
+                })
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_inviteJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+    ) -> jstring {
+        let value = with_1(&mut env, data_dir, "data_dir", |data_dir| {
+            DesktopRuntime::invite(data_dir)
+                .map(to_value)
+                .unwrap_or_else(|err| error_json(err.to_string()))
+        });
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_temporaryInviteJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+    ) -> jstring {
+        let value = with_1(&mut env, data_dir, "data_dir", |data_dir| {
+            DesktopRuntime::temporary_invite(data_dir)
+                .map(to_value)
+                .unwrap_or_else(|err| error_json(err.to_string()))
+        });
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_previewInviteJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        invite_text: JString,
+    ) -> jstring {
+        let value = with_2(
+            &mut env,
+            data_dir,
+            "data_dir",
+            invite_text,
+            "invite_text",
+            |data_dir, invite_text| {
+                DesktopRuntime::preview_invite(data_dir, &invite_text)
+                    .map(to_value)
+                    .unwrap_or_else(|err| error_json(err.to_string()))
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_addContactJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        display_name: JString,
+        invite_uri: JString,
+    ) -> jstring {
+        let value = with_3(
+            &mut env,
+            data_dir,
+            "data_dir",
+            display_name,
+            "display_name",
+            invite_uri,
+            "invite_uri",
+            |data_dir, display_name, invite_uri| {
+                DesktopRuntime::add_contact(data_dir, &display_name, &invite_uri)
+                    .map(to_value)
+                    .unwrap_or_else(|err| error_json(err.to_string()))
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_startTemporaryConnectionJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        invite_uri: JString,
+    ) -> jstring {
+        let value = with_2(
+            &mut env,
+            data_dir,
+            "data_dir",
+            invite_uri,
+            "invite_uri",
+            |data_dir, invite_uri| {
+                DesktopRuntime::start_temporary_connection(data_dir, &invite_uri)
+                    .map(to_value)
+                    .unwrap_or_else(|err| error_json(err.to_string()))
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_sendMessageJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        contact_id: JString,
+        body: JString,
+    ) -> jstring {
+        let value = with_3(
+            &mut env,
+            data_dir,
+            "data_dir",
+            contact_id,
+            "contact_id",
+            body,
+            "body",
+            |data_dir, contact_id, body| {
+                desktop_async(|runtime| {
+                    runtime
+                        .block_on(DesktopRuntime::send_message(data_dir, &contact_id, &body))
+                        .map(to_value)
+                        .unwrap_or_else(|err| error_json(err.to_string()))
+                })
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_sendTemporaryMessageJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        connection_id: JString,
+        body: JString,
+    ) -> jstring {
+        let value = with_3(
+            &mut env,
+            data_dir,
+            "data_dir",
+            connection_id,
+            "connection_id",
+            body,
+            "body",
+            |data_dir, connection_id, body| {
+                desktop_async(|runtime| {
+                    runtime
+                        .block_on(DesktopRuntime::send_temporary_message(
+                            data_dir,
+                            &connection_id,
+                            &body,
+                        ))
+                        .map(to_value)
+                        .unwrap_or_else(|err| error_json(err.to_string()))
+                })
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_endTemporaryConnectionJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        connection_id: JString,
+    ) -> jstring {
+        let value = with_2(
+            &mut env,
+            data_dir,
+            "data_dir",
+            connection_id,
+            "connection_id",
+            |data_dir, connection_id| {
+                DesktopRuntime::end_temporary_connection(data_dir, &connection_id)
+                    .map(to_value)
+                    .unwrap_or_else(|err| error_json(err.to_string()))
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_receiveJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+    ) -> jstring {
+        let value = with_1(&mut env, data_dir, "data_dir", |data_dir| {
+            desktop_async(|runtime| {
+                runtime
+                    .block_on(DesktopRuntime::receive(data_dir))
+                    .map(to_value)
+                    .unwrap_or_else(|err| error_json(err.to_string()))
+            })
+        });
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_p2pProbeJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+    ) -> jstring {
+        let value = with_1(&mut env, data_dir, "data_dir", |data_dir| {
+            desktop_async(|runtime| {
+                runtime
+                    .block_on(DesktopRuntime::p2p_probe(data_dir))
+                    .map(to_value)
+                    .unwrap_or_else(|err| error_json(err.to_string()))
+            })
+        });
+        json_out(&mut env, value)
+    }
+
+    fn with_1(
+        env: &mut JNIEnv,
+        value: JString,
+        name: &str,
+        work: impl FnOnce(String) -> serde_json::Value,
+    ) -> serde_json::Value {
+        match jstring_arg(env, value, name) {
+            Ok(value) => work(value),
+            Err(err) => error_json(err),
+        }
+    }
+
+    fn with_2(
+        env: &mut JNIEnv,
+        first: JString,
+        first_name: &str,
+        second: JString,
+        second_name: &str,
+        work: impl FnOnce(String, String) -> serde_json::Value,
+    ) -> serde_json::Value {
+        match (
+            jstring_arg(env, first, first_name),
+            jstring_arg(env, second, second_name),
+        ) {
+            (Ok(first), Ok(second)) => work(first, second),
+            (first, second) => error_json(
+                first
+                    .err()
+                    .or_else(|| second.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        }
+    }
+
+    fn with_3(
+        env: &mut JNIEnv,
+        first: JString,
+        first_name: &str,
+        second: JString,
+        second_name: &str,
+        third: JString,
+        third_name: &str,
+        work: impl FnOnce(String, String, String) -> serde_json::Value,
+    ) -> serde_json::Value {
+        match (
+            jstring_arg(env, first, first_name),
+            jstring_arg(env, second, second_name),
+            jstring_arg(env, third, third_name),
+        ) {
+            (Ok(first), Ok(second), Ok(third)) => work(first, second, third),
+            (first, second, third) => error_json(
+                first
+                    .err()
+                    .or_else(|| second.err())
+                    .or_else(|| third.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        }
+    }
+
+    fn jstring_arg(env: &mut JNIEnv, value: JString, name: &str) -> Result<String, String> {
+        env.get_string(&value)
+            .map(|value| value.into())
+            .map_err(|err| format!("{name} is not valid UTF-8: {err}"))
+    }
+
+    fn json_out(env: &mut JNIEnv, value: serde_json::Value) -> jstring {
+        let pointer = json_to_c_string(value);
+        if pointer.is_null() {
+            return std::ptr::null_mut();
+        }
+        let text = unsafe { std::ffi::CStr::from_ptr(pointer) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe {
+            drop(std::ffi::CString::from_raw(pointer));
+        }
+        env.new_string(text)
+            .map(|value| value.into_raw())
+            .unwrap_or(std::ptr::null_mut())
+    }
+}
+
 fn desktop_async(
     work: impl FnOnce(tokio::runtime::Runtime) -> serde_json::Value,
 ) -> serde_json::Value {
@@ -326,7 +834,7 @@ fn build_demo_state() -> serde_json::Value {
 
 fn try_build_demo_state() -> Result<DemoState, String> {
     let alice = DeviceKeyMaterial::generate(8);
-    let bob = DeviceKeyMaterial::generate(8);
+    let mut bob = DeviceKeyMaterial::generate(8);
     let bob_bundle = bob.pre_key_bundle();
     let alice_invite = Invite::new(
         alice.pre_key_bundle(),
@@ -338,8 +846,8 @@ fn try_build_demo_state() -> Result<DemoState, String> {
     let (initial, mut alice_session) =
         start_session_as_initiator(&alice, &bob_bundle, CipherSuite::ChaCha20Poly1305)
             .map_err(|err| err.to_string())?;
-    let mut bob_session =
-        accept_session_as_responder(&bob, &initial).map_err(|err| err.to_string())?;
+    let mut bob_session = accept_session_as_responder_consuming_prekey(&mut bob, &initial)
+        .map_err(|err| err.to_string())?;
     let safety = safety_number(&[alice.public_identity()], &[bob.public_identity()]);
     alice_session.mark_verified();
     bob_session.mark_verified();
@@ -404,7 +912,7 @@ fn try_build_demo_state() -> Result<DemoState, String> {
 fn run_protocol_checks() -> Vec<ProtocolCheck> {
     let mut checks = Vec::new();
     let alice = DeviceKeyMaterial::generate(4);
-    let bob = DeviceKeyMaterial::generate(4);
+    let mut bob = DeviceKeyMaterial::generate(4);
     let (initial, mut alice_session) = match start_session_as_initiator(
         &alice,
         &bob.pre_key_bundle(),
@@ -416,7 +924,7 @@ fn run_protocol_checks() -> Vec<ProtocolCheck> {
             return checks;
         }
     };
-    let mut bob_session = match accept_session_as_responder(&bob, &initial) {
+    let mut bob_session = match accept_session_as_responder_consuming_prekey(&mut bob, &initial) {
         Ok(session) => {
             checks.push(passed("X3DH 风格握手", "初始会话建立成功"));
             session

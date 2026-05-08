@@ -17,14 +17,33 @@ CLIENT_QUIC_URL="${CHATRELAY_CLIENT_QUIC_URL:-}"
 CERTBOT_CMD="${CHATRELAY_CERTBOT_CMD:-certbot}"
 STAGING="${CHATRELAY_STAGING:-0}"
 
-if [[ -r "$DEPLOY_CONF" ]]; then
+source_config() {
+  local file="$1"
+  [[ -r "$file" ]] || return 0
+
+  local owner mode perm
+  owner="$(stat -c '%U' "$file")"
+  mode="$(stat -c '%a' "$file")"
+  perm=$((8#$mode))
+  if [[ "$owner" != "root" ]]; then
+    printf 'Refusing to source %s: owner must be root, got %s\n' "$file" "$owner" >&2
+    exit 1
+  fi
+  if (( perm & 0022 )); then
+    printf 'Refusing to source %s: file must not be group/world writable, mode is %s\n' "$file" "$mode" >&2
+    exit 1
+  fi
+
   # shellcheck disable=SC1090
-  source "$DEPLOY_CONF"
+  source "$file"
+}
+
+if [[ -r "$DEPLOY_CONF" ]]; then
+  source_config "$DEPLOY_CONF"
 fi
 
 if [[ -r "$ENV_FILE" ]]; then
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
+  source_config "$ENV_FILE"
 fi
 
 REPO_DIR="${CHATRELAY_REPO_DIR:-$REPO_DIR}"

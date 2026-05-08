@@ -4,6 +4,7 @@ struct MessengerView: View {
     @EnvironmentObject private var store: SecureChatStore
     @State private var showingInvite = false
     @State private var showingAddContact = false
+    @State private var showingTemporary = false
 
     var body: some View {
         NavigationSplitView {
@@ -28,6 +29,13 @@ struct MessengerView: View {
                 .help("Add contact from invite")
 
                 Button {
+                    showingTemporary = true
+                } label: {
+                    Label("Temporary", systemImage: "timer")
+                }
+                .help("Temporary connection")
+
+                Button {
                     Task { await store.receiveMessages() }
                 } label: {
                     Label("Receive", systemImage: "tray.and.arrow.down")
@@ -47,6 +55,10 @@ struct MessengerView: View {
         }
         .sheet(isPresented: $showingAddContact) {
             AddContactSheet()
+                .environmentObject(store)
+        }
+        .sheet(isPresented: $showingTemporary) {
+            TemporaryConnectionSheet()
                 .environmentObject(store)
         }
         .task {
@@ -78,9 +90,37 @@ private struct ContactSidebarView: View {
                     .tag(contact.id)
                 }
             }
+            Section("Temporary") {
+                ForEach(store.appSnapshot?.temporaryConnections ?? []) { connection in
+                    Button {
+                        store.selectedTemporaryConnectionID = connection.id
+                        store.selectedContactID = nil
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "timer")
+                                .foregroundStyle(.orange)
+                                .frame(width: 18)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(connection.displayName)
+                                    .lineLimit(1)
+                                Text(connection.lastMessage ?? shortDevice(connection.deviceId))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
         .listStyle(.sidebar)
         .navigationTitle(store.appSnapshot?.profile?.displayName ?? "SecureChat")
+        .onChange(of: store.selectedContactID) { _, newValue in
+            if newValue != nil {
+                store.selectedTemporaryConnectionID = nil
+            }
+        }
     }
 }
 
@@ -89,7 +129,9 @@ private struct ChatConversationView: View {
     @State private var draft = ""
 
     var body: some View {
-        if let contact = store.selectedContact {
+        if let connection = store.selectedTemporaryConnection {
+            TemporaryConversationView(connection: connection)
+        } else if let contact = store.selectedContact {
             VStack(spacing: 0) {
                 ChatHeaderView(contact: contact)
                 Divider()
@@ -97,7 +139,11 @@ private struct ChatConversationView: View {
                     LazyVStack(spacing: 10) {
                         ForEach(store.selectedMessages) { message in
                             MessageBubble(
-                                message: message,
+                                direction: message.direction,
+                                messageBody: message.body,
+                                status: message.status,
+                                sentAtUnix: message.sentAtUnix,
+                                receivedAtUnix: message.receivedAtUnix,
                                 showsStatus: store.showMessageStatus,
                                 showsTimestamp: store.showMessageTimestamps
                             )
@@ -119,6 +165,42 @@ private struct ChatConversationView: View {
                 systemImage: "person.2",
                 description: Text("Copy your invite or add a friend's invite to start chatting.")
             )
+        }
+    }
+}
+
+private struct TemporaryConversationView: View {
+    @EnvironmentObject private var store: SecureChatStore
+    let connection: TemporaryConnection
+    @State private var draft = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TemporaryHeaderView(connection: connection)
+            Divider()
+            ScrollView {
+                LazyVStack(spacing: 10) {
+                    ForEach(store.selectedTemporaryMessages) { message in
+                        MessageBubble(
+                            direction: message.direction,
+                            messageBody: message.body,
+                            status: message.status,
+                            sentAtUnix: message.sentAtUnix,
+                            receivedAtUnix: message.receivedAtUnix,
+                            showsStatus: store.showMessageStatus,
+                            showsTimestamp: store.showMessageTimestamps
+                        )
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity)
+            }
+            Divider()
+            ComposerView(draft: $draft) {
+                let body = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                draft = ""
+                Task { await store.sendTemporaryMessage(body) }
+            }
         }
     }
 }
@@ -149,23 +231,59 @@ private struct ChatHeaderView: View {
     }
 }
 
+private struct TemporaryHeaderView: View {
+    @EnvironmentObject private var store: SecureChatStore
+    let connection: TemporaryConnection
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "timer")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(connection.displayName)
+                    .font(.headline)
+                Text("Safety \(connection.safetyNumber)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .textSelection(.enabled)
+            }
+            Spacer()
+            Button(role: .destructive) {
+                Task { await store.endTemporaryConnection() }
+            } label: {
+                Label("End", systemImage: "xmark.circle")
+            }
+            Text(shortDevice(connection.deviceId))
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+    }
+}
+
 private struct MessageBubble: View {
-    let message: AppChatMessage
+    let direction: AppMessageDirection
+    let messageBody: String
+    let status: AppMessageStatus
+    let sentAtUnix: UInt64
+    let receivedAtUnix: UInt64?
     let showsStatus: Bool
     let showsTimestamp: Bool
 
-    var isOutgoing: Bool { message.direction == .outgoing }
+    var isOutgoing: Bool { direction == .outgoing }
 
     var body: some View {
         HStack {
             if isOutgoing { Spacer(minLength: 80) }
             VStack(alignment: .leading, spacing: 5) {
-                Text(message.body)
+                Text(messageBody)
                     .textSelection(.enabled)
                 if showsStatus || showsTimestamp {
                     HStack(spacing: 6) {
                         if showsStatus {
-                            Text(message.status.rawValue.capitalized)
+                            Text(status.rawValue.capitalized)
                         }
                         if showsTimestamp {
                             Text(messageTime)
@@ -183,7 +301,7 @@ private struct MessageBubble: View {
     }
 
     private var messageTime: String {
-        let unix = message.receivedAtUnix ?? message.sentAtUnix
+        let unix = receivedAtUnix ?? sentAtUnix
         return Self.timeFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(unix)))
     }
 
@@ -233,6 +351,10 @@ private struct InviteSheet: View {
                     store.copyOwnInvite()
                     dismiss()
                 }
+                Button("Copy Temporary") {
+                    store.copyTemporaryInvite()
+                    dismiss()
+                }
                 .keyboardShortcut(.defaultAction)
                 Spacer()
                 Button("Close") { dismiss() }
@@ -274,7 +396,7 @@ private struct AddContactSheet: View {
                 Button {
                     Task { await refreshInvitePreview(inviteText) }
                 } label: {
-                    Label("Verify", systemImage: "checkmark.shield")
+                    Label("Check", systemImage: "checkmark.shield")
                 }
                 .disabled(inviteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -316,7 +438,20 @@ private struct AddContactSheet: View {
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(invitePreview == nil || isCheckingInvite)
+                .disabled(invitePreview == nil || invitePreview?.temporary == true || isCheckingInvite)
+                if invitePreview?.temporary == true {
+                    Button("Start Temporary") {
+                        Task {
+                            guard let invitePreview else { return }
+                            let didStart = await store.startTemporaryConnection(
+                                inviteURI: invitePreview.normalizedInviteUri
+                            )
+                            if didStart {
+                                dismiss()
+                            }
+                        }
+                    }
+                }
                 Spacer()
                 Button("Cancel") { dismiss() }
             }
@@ -370,17 +505,76 @@ private struct AddContactSheet: View {
     }
 }
 
+private struct TemporaryConnectionSheet: View {
+    @EnvironmentObject private var store: SecureChatStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var inviteText = ""
+    @State private var previewError: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Temporary Connection")
+                .font(.headline)
+
+            TextField("Paste temporary schat://invite/... link", text: $inviteText, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(3...6)
+
+            HStack {
+                Button {
+                    if let pasted = Clipboard.readString() {
+                        inviteText = pasted
+                    }
+                } label: {
+                    Label("Paste Invite", systemImage: "doc.on.clipboard")
+                }
+                Button {
+                    store.copyTemporaryInvite()
+                    dismiss()
+                } label: {
+                    Label("Copy Temporary Invite", systemImage: "timer")
+                }
+            }
+
+            if let previewError {
+                Label(previewError, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                Button("Start") {
+                    Task {
+                        let didStart = await store.startTemporaryConnection(inviteURI: inviteText)
+                        if didStart {
+                            dismiss()
+                        } else {
+                            previewError = store.errorMessage
+                        }
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(inviteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Spacer()
+                Button("Cancel") { dismiss() }
+            }
+        }
+        .padding(20)
+        .frame(width: 560)
+    }
+}
+
 private struct InvitePreviewCard: View {
     let preview: InvitePreview
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label(
-                preview.alreadyAdded ? "Already in contacts" : "Invite verified",
-                systemImage: preview.alreadyAdded ? "person.crop.circle.badge.checkmark" : "checkmark.shield.fill"
+                preview.temporary ? "Temporary invite" : (preview.alreadyAdded ? "Already in contacts" : "Invite valid"),
+                systemImage: preview.temporary ? "timer" : (preview.alreadyAdded ? "person.crop.circle.badge.checkmark" : "checkmark.shield.fill")
             )
             .font(.headline)
-            .foregroundStyle(preview.alreadyAdded ? Color.secondary : Color.green)
+            .foregroundStyle(preview.temporary ? Color.orange : (preview.alreadyAdded ? Color.secondary : Color.green))
 
             Text(preview.suggestedDisplayName)
                 .font(.callout.weight(.semibold))

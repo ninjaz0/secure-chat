@@ -7,6 +7,7 @@ final class SecureChatStore: ObservableObject {
     @Published private(set) var relaySmoke: RelaySmokeResult?
     @Published private(set) var p2pProbe: P2pProbeResult?
     @Published var selectedContactID: String?
+    @Published var selectedTemporaryConnectionID: String?
     @Published var autoReceiveEnabled: Bool {
         didSet { defaults.set(autoReceiveEnabled, forKey: PreferenceKey.autoReceiveEnabled) }
     }
@@ -57,6 +58,15 @@ final class SecureChatStore: ObservableObject {
     var selectedMessages: [AppChatMessage] {
         guard let selectedContactID else { return [] }
         return appSnapshot?.messages.filter { $0.contactId == selectedContactID } ?? []
+    }
+
+    var selectedTemporaryConnection: TemporaryConnection? {
+        appSnapshot?.temporaryConnections.first { $0.id == selectedTemporaryConnectionID }
+    }
+
+    var selectedTemporaryMessages: [TemporaryMessage] {
+        guard let selectedTemporaryConnectionID else { return [] }
+        return appSnapshot?.temporaryMessages.filter { $0.connectionId == selectedTemporaryConnectionID } ?? []
     }
 
     var isReady: Bool {
@@ -160,6 +170,37 @@ final class SecureChatStore: ObservableObject {
         }
     }
 
+    func copyTemporaryInvite() {
+        if let invite = try? SecureChatCoreClient.temporaryInvite() {
+            Clipboard.copy(invite.inviteUri)
+        }
+    }
+
+    @discardableResult
+    func startTemporaryConnection(inviteURI: String) async -> Bool {
+        return await runLoading {
+            let response = try SecureChatCoreClient.startTemporaryConnection(inviteURI: inviteURI)
+            apply(snapshot: response.snapshot)
+            selectedTemporaryConnectionID = response.connectionId
+        }
+    }
+
+    func sendTemporaryMessage(_ body: String) async {
+        guard let selectedTemporaryConnectionID else { return }
+        await runLoading {
+            apply(snapshot: try SecureChatCoreClient.sendTemporaryMessage(connectionID: selectedTemporaryConnectionID, body: body))
+            self.selectedTemporaryConnectionID = selectedTemporaryConnectionID
+        }
+    }
+
+    func endTemporaryConnection() async {
+        guard let selectedTemporaryConnectionID else { return }
+        await runLoading {
+            apply(snapshot: try SecureChatCoreClient.endTemporaryConnection(connectionID: selectedTemporaryConnectionID))
+            self.selectedTemporaryConnectionID = nil
+        }
+    }
+
     func resetPreferences() {
         autoReceiveEnabled = true
         receivePollIntervalSeconds = 5
@@ -189,6 +230,10 @@ final class SecureChatStore: ObservableObject {
         appSnapshot = snapshot
         if selectedContactID == nil || !(snapshot.contacts.contains { $0.id == selectedContactID }) {
             selectedContactID = snapshot.contacts.first?.id
+        }
+        if let selectedTemporaryConnectionID,
+           !(snapshot.temporaryConnections.contains { $0.id == selectedTemporaryConnectionID }) {
+            self.selectedTemporaryConnectionID = nil
         }
     }
 

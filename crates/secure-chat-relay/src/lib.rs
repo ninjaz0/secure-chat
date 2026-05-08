@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use rusqlite::{params, Connection};
+use rustls_pki_types::pem::PemObject;
 use secure_chat_core::{
     verify_relay_auth_for_request, AccountId, DeviceId, DevicePreKeyBundle, DrainReceiptsResponse,
     DrainRequest, DrainResponse, ListP2pCandidatesRequest, P2pCandidate, P2pCandidateDraft,
@@ -10,7 +11,7 @@ use secure_chat_core::{
     QueuedReceipt, ReceiptKind, ReceiptRequest, RegisterRequest, RegisterResponse, RelayAuth,
     RelayCommand, RelayCommandResponse, SendRequest, P2P_CANDIDATE_TTL_SECS, RELAY_QUIC_ALPN,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, BufReader};
 use std::net::SocketAddr;
@@ -21,6 +22,16 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
+
+const MAX_TOTAL_DEVICES: usize = 100_000;
+const MAX_DEVICES_PER_ACCOUNT: usize = 16;
+const MAX_QUEUE_MESSAGES_PER_DEVICE: usize = 1_024;
+const MAX_RECEIPTS_PER_DEVICE: usize = 2_048;
+const MAX_AUTH_NONCES_PER_DEVICE: usize = 2_048;
+const MAX_MESSAGE_CIPHERTEXT_BYTES: usize = 1024 * 1024;
+const MAX_SEALED_SENDER_BYTES: usize = 16 * 1024;
+const MAX_MESSAGE_TTL_SECS: u64 = 30 * 24 * 60 * 60;
+const MAX_P2P_PROBE_BYTES: usize = 4096;
 
 #[derive(Clone, Default)]
 pub struct AppState {
@@ -35,12 +46,40 @@ struct RelayState {
     receipts: HashMap<DeviceId, VecDeque<QueuedReceipt>>,
     auth_nonces: HashMap<DeviceId, VecDeque<AuthNonceRecord>>,
     p2p_candidates: HashMap<DeviceId, Vec<P2pCandidate>>,
+    peer_links: HashSet<DevicePair>,
+    receipt_grants: HashMap<Uuid, ReceiptGrant>,
 }
 
 #[derive(Clone)]
 struct AuthNonceRecord {
     issued_unix: u64,
     nonce: [u8; 16],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct DevicePair {
+    left: DeviceId,
+    right: DeviceId,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct ReceiptGrant {
+    message_id: Uuid,
+    sender_account_id: AccountId,
+    sender_device_id: DeviceId,
+    recipient_account_id: AccountId,
+    recipient_device_id: DeviceId,
+    expires_unix: u64,
+}
+
+impl DevicePair {
+    fn new(a: DeviceId, b: DeviceId) -> Self {
+        if a <= b {
+            Self { left: a, right: b }
+        } else {
+            Self { left: b, right: a }
+        }
+    }
 }
 
 impl AppState {
@@ -163,7 +202,7 @@ pub async fn run_p2p_rendezvous_with_state(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let socket = tokio::net::UdpSocket::bind(addr).await?;
     tracing::info!(%addr, "secure-chat P2P rendezvous listening");
-    let mut buffer = vec![0u8; 64 * 1024];
+    let mut buffer = vec![0u8; MAX_P2P_PROBE_BYTES];
     loop {
         let (len, peer_addr) = socket.recv_from(&mut buffer).await?;
         let response = match serde_json::from_slice::<P2pProbeRequest>(&buffer[..len]) {
@@ -300,6 +339,7 @@ async fn register_device_inner(
             &signed_request,
             request.auth.as_ref(),
         )?;
+        enforce_device_limits(&inner, account_id, device_id)?;
     }
     persist_device(state.db_path(), account_id, device_id, &request.bundle).map_err(|err| {
         tracing::error!(%err, "persist device failed");
@@ -410,6 +450,13 @@ async fn list_p2p_candidates_inner(
     if !target_exists {
         return Err(StatusCode::NOT_FOUND);
     }
+    if !can_access_p2p_candidates(
+        &inner,
+        request.requester_device_id,
+        request.target_device_id,
+    ) {
+        return Err(StatusCode::FORBIDDEN);
+    }
     Ok(P2pCandidatesResponse {
         candidates: live_p2p_candidates(&mut inner, request.target_device_id),
     })
@@ -477,6 +524,16 @@ async fn send_message_inner(
         &signed_request,
         request.auth.as_ref(),
     )?;
+    if request.ciphertext.len() > MAX_MESSAGE_CIPHERTEXT_BYTES {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    if request
+        .sealed_sender
+        .as_ref()
+        .is_some_and(|sealed| sealed.len() > MAX_SEALED_SENDER_BYTES)
+    {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
     let exists = inner
         .devices
         .get(&request.to_account_id)
@@ -485,6 +542,16 @@ async fn send_message_inner(
     if !exists {
         return Err(StatusCode::NOT_FOUND);
     }
+    let queue = inner.queues.entry(request.to_device_id).or_default();
+    if queue.len() >= MAX_QUEUE_MESSAGES_PER_DEVICE {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    let now = now_unix();
+    let max_expires_unix = now + MAX_MESSAGE_TTL_SECS;
+    let expires_unix = request
+        .expires_unix
+        .map(|expires| expires.min(max_expires_unix))
+        .or(Some(max_expires_unix));
     let message = QueuedMessage {
         id: Uuid::new_v4(),
         sender_account_id: Some(sender_account_id),
@@ -492,18 +559,34 @@ async fn send_message_inner(
         transport_kind: request.transport_kind,
         sealed_sender: request.sealed_sender,
         ciphertext: request.ciphertext,
-        received_unix: now_unix(),
-        expires_unix: request.expires_unix,
+        received_unix: now,
+        expires_unix,
+    };
+    let grant = ReceiptGrant {
+        message_id: message.id,
+        sender_account_id,
+        sender_device_id,
+        recipient_account_id: request.to_account_id,
+        recipient_device_id: request.to_device_id,
+        expires_unix: expires_unix.unwrap_or(max_expires_unix),
     };
     persist_message(state.db_path(), request.to_device_id, &message).map_err(|err| {
         tracing::error!(%err, "persist message failed");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+    persist_receipt_grant(state.db_path(), &grant).map_err(|err| {
+        tracing::error!(%err, "persist receipt grant failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    persist_peer_link(state.db_path(), sender_device_id, request.to_device_id).map_err(|err| {
+        tracing::error!(%err, "persist peer link failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    queue.push_back(message.clone());
+    inner.receipt_grants.insert(message.id, grant);
     inner
-        .queues
-        .entry(request.to_device_id)
-        .or_default()
-        .push_back(message.clone());
+        .peer_links
+        .insert(DevicePair::new(sender_device_id, request.to_device_id));
     Ok(message)
 }
 
@@ -533,38 +616,45 @@ async fn drain_messages_inner(
         request.auth.as_ref(),
     )?;
     let now = now_unix();
-    let queue = inner.queues.entry(request.device_id).or_default();
     let mut messages = Vec::new();
     let mut delivery_receipts = Vec::new();
     let mut drained_message_ids = Vec::new();
     let mut expired_message_ids = Vec::new();
-    while let Some(message) = queue.pop_front() {
-        if message.expires_unix.is_none_or(|expires| expires >= now) {
-            drained_message_ids.push(message.id);
-            if let (Some(sender_account_id), Some(sender_device_id)) =
-                (message.sender_account_id, message.sender_device_id)
-            {
-                delivery_receipts.push((
-                    sender_device_id,
-                    QueuedReceipt {
-                        id: Uuid::new_v4(),
-                        message_id: message.id,
-                        from_account_id: request.account_id,
-                        from_device_id: request.device_id,
-                        kind: ReceiptKind::Delivered,
-                        at_unix: now,
-                    },
-                ));
-                let _ = sender_account_id;
+    {
+        let queue = inner.queues.entry(request.device_id).or_default();
+        while let Some(message) = queue.pop_front() {
+            if message.expires_unix.is_none_or(|expires| expires >= now) {
+                drained_message_ids.push(message.id);
+                if let (Some(sender_account_id), Some(sender_device_id)) =
+                    (message.sender_account_id, message.sender_device_id)
+                {
+                    delivery_receipts.push((
+                        sender_device_id,
+                        QueuedReceipt {
+                            id: Uuid::new_v4(),
+                            message_id: message.id,
+                            from_account_id: request.account_id,
+                            from_device_id: request.device_id,
+                            kind: ReceiptKind::Delivered,
+                            at_unix: now,
+                        },
+                    ));
+                    let _ = sender_account_id;
+                }
+                messages.push(message);
+            } else {
+                expired_message_ids.push(message.id);
             }
-            messages.push(message);
-        } else {
-            expired_message_ids.push(message.id);
         }
     }
     for (sender_device_id, receipt) in delivery_receipts {
+        if receipt_queue_is_full(&inner, sender_device_id) {
+            tracing::warn!(%sender_device_id, "dropping delivery receipt because receipt queue is full");
+            continue;
+        }
         if let Err(err) = persist_receipt(state.db_path(), sender_device_id, &receipt) {
             tracing::error!(%err, "persist delivery receipt failed");
+            continue;
         }
         inner
             .receipts
@@ -572,9 +662,18 @@ async fn drain_messages_inner(
             .or_default()
             .push_back(receipt);
     }
-    for message_id in drained_message_ids.into_iter().chain(expired_message_ids) {
+    for message_id in drained_message_ids {
         if let Err(err) = delete_message(state.db_path(), message_id) {
             tracing::error!(%err, "delete drained message failed");
+        }
+    }
+    for message_id in expired_message_ids {
+        if let Err(err) = delete_message(state.db_path(), message_id) {
+            tracing::error!(%err, "delete expired message failed");
+        }
+        inner.receipt_grants.remove(&message_id);
+        if let Err(err) = delete_receipt_grant(state.db_path(), message_id) {
+            tracing::error!(%err, "delete expired receipt grant failed");
         }
     }
     Ok(DrainResponse { messages })
@@ -613,6 +712,10 @@ async fn send_receipt_inner(
         .is_some();
     if !exists {
         return Err(StatusCode::NOT_FOUND);
+    }
+    validate_receipt_grant(&mut inner, &request)?;
+    if receipt_queue_is_full(&inner, request.to_device_id) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
     }
     let receipt = QueuedReceipt {
         id: Uuid::new_v4(),
@@ -711,6 +814,78 @@ fn verify_relay_auth<T: serde::Serialize>(
         issued_unix: auth.issued_unix,
         nonce: auth.nonce,
     });
+    while nonces.len() > MAX_AUTH_NONCES_PER_DEVICE {
+        nonces.pop_front();
+    }
+    Ok(())
+}
+
+fn enforce_device_limits(
+    inner: &RelayState,
+    account_id: AccountId,
+    device_id: DeviceId,
+) -> Result<(), StatusCode> {
+    if inner
+        .devices
+        .get(&account_id)
+        .and_then(|devices| devices.get(&device_id))
+        .is_some()
+    {
+        return Ok(());
+    }
+    if inner.devices.iter().any(|(existing_account_id, devices)| {
+        *existing_account_id != account_id && devices.contains_key(&device_id)
+    }) {
+        return Err(StatusCode::CONFLICT);
+    }
+    let total_devices: usize = inner.devices.values().map(HashMap::len).sum();
+    if total_devices >= MAX_TOTAL_DEVICES {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    let account_devices = inner.devices.get(&account_id).map_or(0, HashMap::len);
+    if account_devices >= MAX_DEVICES_PER_ACCOUNT {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    Ok(())
+}
+
+fn receipt_queue_is_full(inner: &RelayState, device_id: DeviceId) -> bool {
+    inner
+        .receipts
+        .get(&device_id)
+        .is_some_and(|queue| queue.len() >= MAX_RECEIPTS_PER_DEVICE)
+}
+
+fn can_access_p2p_candidates(
+    inner: &RelayState,
+    requester_device_id: DeviceId,
+    target_device_id: DeviceId,
+) -> bool {
+    requester_device_id == target_device_id
+        || inner
+            .peer_links
+            .contains(&DevicePair::new(requester_device_id, target_device_id))
+}
+
+fn validate_receipt_grant(
+    inner: &mut RelayState,
+    request: &ReceiptRequest,
+) -> Result<(), StatusCode> {
+    let now = now_unix();
+    inner
+        .receipt_grants
+        .retain(|_, grant| grant.expires_unix >= now);
+    let grant = inner
+        .receipt_grants
+        .get(&request.message_id)
+        .ok_or(StatusCode::FORBIDDEN)?;
+    if grant.sender_account_id != request.to_account_id
+        || grant.sender_device_id != request.to_device_id
+        || grant.recipient_account_id != request.from_account_id
+        || grant.recipient_device_id != request.from_device_id
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
     Ok(())
 }
 
@@ -850,6 +1025,18 @@ fn init_relay_db(path: &Path) -> rusqlite::Result<()> {
             PRIMARY KEY(device_id, addr)
         );
         CREATE INDEX IF NOT EXISTS idx_p2p_candidates_device ON p2p_candidates(device_id, expires_unix);
+        CREATE TABLE IF NOT EXISTS peer_links (
+            left_device_id TEXT NOT NULL,
+            right_device_id TEXT NOT NULL,
+            created_unix INTEGER NOT NULL,
+            PRIMARY KEY(left_device_id, right_device_id)
+        );
+        CREATE TABLE IF NOT EXISTS receipt_grants (
+            message_id TEXT NOT NULL PRIMARY KEY,
+            grant_json TEXT NOT NULL,
+            expires_unix INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_receipt_grants_expires ON receipt_grants(expires_unix);
         "#,
     )?;
     conn.execute(
@@ -858,6 +1045,10 @@ fn init_relay_db(path: &Path) -> rusqlite::Result<()> {
     )?;
     conn.execute(
         "DELETE FROM p2p_candidates WHERE expires_unix < ?1",
+        params![now_unix() as i64],
+    )?;
+    conn.execute(
+        "DELETE FROM receipt_grants WHERE expires_unix < ?1",
         params![now_unix() as i64],
     )?;
     Ok(())
@@ -871,6 +1062,10 @@ fn load_relay_state(path: &Path) -> rusqlite::Result<RelayState> {
     let rows = devices.query_map([], |row| row.get::<_, String>(0))?;
     for row in rows {
         let bundle: DevicePreKeyBundle = parse_json(&row?)?;
+        if let Err(err) = bundle.verify() {
+            tracing::warn!(%err, "skipping invalid persisted device bundle");
+            continue;
+        }
         state
             .devices
             .entry(bundle.identity.account_id)
@@ -925,6 +1120,29 @@ fn load_relay_state(path: &Path) -> rusqlite::Result<RelayState> {
             .entry(device_id)
             .or_default()
             .push(candidate);
+    }
+
+    let mut peer_links = conn.prepare("SELECT left_device_id, right_device_id FROM peer_links")?;
+    let rows = peer_links.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (left, right) = row?;
+        state
+            .peer_links
+            .insert(DevicePair::new(parse_uuid(&left)?, parse_uuid(&right)?));
+    }
+
+    let mut receipt_grants =
+        conn.prepare("SELECT message_id, grant_json FROM receipt_grants WHERE expires_unix >= ?1")?;
+    let rows = receipt_grants.query_map(params![now], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (message_id, json) = row?;
+        state
+            .receipt_grants
+            .insert(parse_uuid(&message_id)?, parse_json(&json)?);
     }
 
     Ok(state)
@@ -1032,6 +1250,45 @@ fn persist_p2p_candidates(
     Ok(())
 }
 
+fn persist_peer_link(
+    db_path: Option<&Path>,
+    left_device_id: DeviceId,
+    right_device_id: DeviceId,
+) -> rusqlite::Result<()> {
+    let Some(path) = db_path else {
+        return Ok(());
+    };
+    let pair = DevicePair::new(left_device_id, right_device_id);
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO peer_links(left_device_id, right_device_id, created_unix)
+         VALUES (?1, ?2, ?3)",
+        params![
+            pair.left.to_string(),
+            pair.right.to_string(),
+            now_unix() as i64
+        ],
+    )?;
+    Ok(())
+}
+
+fn persist_receipt_grant(db_path: Option<&Path>, grant: &ReceiptGrant) -> rusqlite::Result<()> {
+    let Some(path) = db_path else {
+        return Ok(());
+    };
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO receipt_grants(message_id, grant_json, expires_unix)
+         VALUES (?1, ?2, ?3)",
+        params![
+            grant.message_id.to_string(),
+            to_json(grant)?,
+            grant.expires_unix as i64
+        ],
+    )?;
+    Ok(())
+}
+
 fn delete_message(db_path: Option<&Path>, message_id: Uuid) -> rusqlite::Result<()> {
     let Some(path) = db_path else {
         return Ok(());
@@ -1039,6 +1296,18 @@ fn delete_message(db_path: Option<&Path>, message_id: Uuid) -> rusqlite::Result<
     let conn = Connection::open(path)?;
     conn.execute(
         "DELETE FROM messages WHERE id = ?1",
+        params![message_id.to_string()],
+    )?;
+    Ok(())
+}
+
+fn delete_receipt_grant(db_path: Option<&Path>, message_id: Uuid) -> rusqlite::Result<()> {
+    let Some(path) = db_path else {
+        return Ok(());
+    };
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "DELETE FROM receipt_grants WHERE message_id = ?1",
         params![message_id.to_string()],
     )?;
     Ok(())
@@ -1114,14 +1383,15 @@ async fn handle_quic_connection(
 }
 
 fn load_certs(path: &Path) -> io::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
-    let mut reader = BufReader::new(File::open(path)?);
-    rustls_pemfile::certs(&mut reader).collect()
+    let reader = BufReader::new(File::open(path)?);
+    rustls::pki_types::CertificateDer::pem_reader_iter(reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
 }
 
 fn load_private_key(path: &Path) -> io::Result<rustls::pki_types::PrivateKeyDer<'static>> {
-    let mut reader = BufReader::new(File::open(path)?);
-    rustls_pemfile::private_key(&mut reader)?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing private key"))
+    rustls::pki_types::PrivateKeyDer::from_pem_file(path)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
 }
 
 fn install_crypto_provider() {
@@ -1341,6 +1611,221 @@ mod tests {
         let response = list_p2p_candidates_inner(&state, list).await.unwrap();
         assert_eq!(response.candidates.len(), 1);
         assert_eq!(response.candidates[0].addr, "127.0.0.1:40000");
+    }
+
+    #[tokio::test]
+    async fn p2p_candidates_require_existing_peer_link() {
+        let alice = DeviceKeyMaterial::generate(1);
+        let bob = DeviceKeyMaterial::generate(1);
+        let state = AppState::memory();
+        register_device_inner(&state, signed_register(&alice))
+            .await
+            .unwrap();
+        register_device_inner(&state, signed_register(&bob))
+            .await
+            .unwrap();
+
+        publish_p2p_candidates_inner(&state, signed_publish_candidates(&bob, "127.0.0.1:41000"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            list_p2p_candidates_inner(&state, signed_list_candidates(&alice, &bob))
+                .await
+                .unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
+
+        send_message_inner(&state, signed_send(&alice, &bob, b"hello".to_vec()))
+            .await
+            .unwrap();
+
+        let response = list_p2p_candidates_inner(&state, signed_list_candidates(&alice, &bob))
+            .await
+            .unwrap();
+        assert_eq!(response.candidates.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn receipts_require_matching_message_grant() {
+        let alice = DeviceKeyMaterial::generate(1);
+        let bob = DeviceKeyMaterial::generate(1);
+        let state = AppState::memory();
+        register_device_inner(&state, signed_register(&alice))
+            .await
+            .unwrap();
+        register_device_inner(&state, signed_register(&bob))
+            .await
+            .unwrap();
+
+        let message = send_message_inner(&state, signed_send(&alice, &bob, b"ciphertext".to_vec()))
+            .await
+            .unwrap();
+
+        let spoofed = signed_receipt(&alice, message.id, &bob);
+        assert_eq!(
+            send_receipt_inner(&state, spoofed).await.unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
+
+        let valid = signed_receipt(&bob, message.id, &alice);
+        send_receipt_inner(&state, valid).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn relay_rejects_oversized_ciphertext() {
+        let keys = DeviceKeyMaterial::generate(1);
+        let state = AppState::memory();
+        register_device_inner(&state, signed_register(&keys))
+            .await
+            .unwrap();
+
+        let oversized = vec![0u8; MAX_MESSAGE_CIPHERTEXT_BYTES + 1];
+        assert_eq!(
+            send_message_inner(&state, signed_send(&keys, &keys, oversized))
+                .await
+                .unwrap_err(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_rejects_device_id_collision_across_accounts() {
+        let alice = DeviceKeyMaterial::generate(1);
+        let mut attacker = DeviceKeyMaterial::generate(1);
+        attacker.device_id = alice.device_id;
+        attacker.refresh_signatures();
+        let state = AppState::memory();
+        register_device_inner(&state, signed_register(&alice))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            register_device_inner(&state, signed_register(&attacker))
+                .await
+                .unwrap_err(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    fn signed_register(keys: &DeviceKeyMaterial) -> RegisterRequest {
+        let mut request = RegisterRequest {
+            bundle: keys.pre_key_bundle(),
+            auth: None,
+        };
+        request.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                keys,
+                "register_device",
+                &request,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        request
+    }
+
+    fn signed_send(
+        sender: &DeviceKeyMaterial,
+        recipient: &DeviceKeyMaterial,
+        ciphertext: Vec<u8>,
+    ) -> SendRequest {
+        let mut request = SendRequest {
+            sender_account_id: Some(sender.account_id),
+            sender_device_id: Some(sender.device_id),
+            to_account_id: recipient.account_id,
+            to_device_id: recipient.device_id,
+            transport_kind: TransportKind::RelayHttps,
+            sealed_sender: None,
+            ciphertext,
+            expires_unix: None,
+            auth: None,
+        };
+        request.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                sender,
+                "send_message",
+                &request,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        request
+    }
+
+    fn signed_receipt(
+        sender: &DeviceKeyMaterial,
+        message_id: Uuid,
+        recipient: &DeviceKeyMaterial,
+    ) -> ReceiptRequest {
+        let mut request = ReceiptRequest {
+            message_id,
+            from_account_id: sender.account_id,
+            from_device_id: sender.device_id,
+            to_account_id: recipient.account_id,
+            to_device_id: recipient.device_id,
+            kind: ReceiptKind::Read,
+            at_unix: now_unix(),
+            auth: None,
+        };
+        request.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                sender,
+                "send_receipt",
+                &request,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        request
+    }
+
+    fn signed_publish_candidates(
+        keys: &DeviceKeyMaterial,
+        addr: &str,
+    ) -> secure_chat_core::PublishP2pCandidatesRequest {
+        let mut request = secure_chat_core::PublishP2pCandidatesRequest {
+            account_id: keys.account_id,
+            device_id: keys.device_id,
+            candidates: vec![secure_chat_core::P2pCandidateDraft {
+                kind: secure_chat_core::P2pCandidateKind::Host,
+                addr: addr.to_string(),
+            }],
+            auth: None,
+        };
+        request.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                keys,
+                "publish_p2p_candidates",
+                &request,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        request
+    }
+
+    fn signed_list_candidates(
+        requester: &DeviceKeyMaterial,
+        target: &DeviceKeyMaterial,
+    ) -> secure_chat_core::ListP2pCandidatesRequest {
+        let mut request = secure_chat_core::ListP2pCandidatesRequest {
+            requester_account_id: requester.account_id,
+            requester_device_id: requester.device_id,
+            target_account_id: target.account_id,
+            target_device_id: target.device_id,
+            auth: None,
+        };
+        request.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                requester,
+                "list_p2p_candidates",
+                &request,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        request
     }
 
     fn signed_drain(keys: &DeviceKeyMaterial, action: &str) -> DrainRequest {

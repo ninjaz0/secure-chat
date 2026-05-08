@@ -4,7 +4,7 @@ services:
     image: secure-chat-relay:latest
     restart: unless-stopped
     environment:
-      SECURE_CHAT_RELAY_HTTP_ADDR: 0.0.0.0:8787
+      SECURE_CHAT_RELAY_HTTP_ADDR: 127.0.0.1:8787
       SECURE_CHAT_RELAY_HTTPS_ADDR: 0.0.0.0:443
       SECURE_CHAT_RELAY_QUIC_ADDR: 0.0.0.0:443
       SECURE_CHAT_RELAY_P2P_ADDR: 0.0.0.0:3478
@@ -13,7 +13,6 @@ services:
       SECURE_CHAT_RELAY_DB: /data/relay.sqlite3
       RUST_LOG: secure_chat_relay=info,tower_http=warn
     ports:
-      - "8787:8787/tcp"
       - "443:443/tcp"
       - "443:443/udp"
       - "3478:3478/udp"

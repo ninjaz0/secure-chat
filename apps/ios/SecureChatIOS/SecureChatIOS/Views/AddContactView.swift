@@ -30,7 +30,7 @@ struct AddContactView: View {
                     Button {
                         Task { await refreshInvitePreview(inviteText) }
                     } label: {
-                        Label("Verify Invite", systemImage: "checkmark.shield")
+                        Label("Check Invite", systemImage: "checkmark.shield")
                     }
                     .disabled(inviteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
@@ -81,7 +81,27 @@ struct AddContactView: View {
                             systemImage: "person.badge.plus"
                         )
                     }
-                    .disabled(invitePreview == nil || isCheckingInvite)
+                    .disabled(invitePreview == nil || invitePreview?.temporary == true || isCheckingInvite)
+
+                    if invitePreview?.temporary == true {
+                        Button {
+                            Task {
+                                if invitePreview == nil {
+                                    await refreshInvitePreview(inviteText)
+                                }
+                                guard let invitePreview else { return }
+                                let didStart = await store.startTemporaryConnection(
+                                    inviteURI: invitePreview.normalizedInviteUri
+                                )
+                                if didStart {
+                                    dismiss()
+                                }
+                            }
+                        } label: {
+                            Label("Start Temporary Chat", systemImage: "timer")
+                        }
+                        .disabled(isCheckingInvite)
+                    }
                 }
             }
             .navigationTitle("Add Contact")
@@ -144,10 +164,10 @@ private struct InvitePreviewRows: View {
 
     var body: some View {
         Label(
-            preview.alreadyAdded ? "Already in contacts" : "Invite verified",
-            systemImage: preview.alreadyAdded ? "person.crop.circle.badge.checkmark" : "checkmark.shield.fill"
+            preview.temporary ? "Temporary invite" : (preview.alreadyAdded ? "Already in contacts" : "Invite valid"),
+            systemImage: preview.temporary ? "timer" : (preview.alreadyAdded ? "person.crop.circle.badge.checkmark" : "checkmark.shield.fill")
         )
-        .foregroundStyle(preview.alreadyAdded ? Color.secondary : Color.green)
+        .foregroundStyle(preview.temporary ? Color.orange : (preview.alreadyAdded ? Color.secondary : Color.green))
 
         LabeledContent("Name", value: preview.suggestedDisplayName)
         LabeledContent("Device", value: shortDevice(preview.deviceId))

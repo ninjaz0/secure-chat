@@ -7,7 +7,6 @@ authors.workspace = true
 
 [dependencies]
 base64.workspace = true
-keyring.workspace = true
 rusqlite.workspace = true
 secure-chat-client = { path = "../secure-chat-client" }
 secure-chat-core = { path = "../secure-chat-core" }
@@ -17,3 +16,5 @@ thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 
+[target.'cfg(not(target_os = "android"))'.dependencies]
+keyring.workspace = true

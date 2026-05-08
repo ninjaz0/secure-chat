@@ -208,10 +208,13 @@ docker compose up -d --build
 
 The Compose file exposes:
 
-- `8787/tcp` for local HTTP diagnostics
 - `443/tcp` for HTTPS
 - `443/udp` for QUIC
 - `3478/udp` for signed P2P rendezvous
+
+The unauthenticated HTTP listener is bound to `127.0.0.1:8787` inside the
+container and is intentionally not published to the host. Use HTTPS or QUIC
+for client traffic.
 
 ## Operations
 

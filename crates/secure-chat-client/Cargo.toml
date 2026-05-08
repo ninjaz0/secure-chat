@@ -10,7 +10,7 @@ quinn.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
-rustls-pemfile.workspace = true
+rustls-pki-types.workspace = true
 secure-chat-core = { path = "../secure-chat-core" }
 secure-chat-relay = { path = "../secure-chat-relay" }
 serde.workspace = true

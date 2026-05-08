@@ -84,6 +84,8 @@ struct AppSnapshot: Decodable {
     let profile: AppProfile?
     let contacts: [AppContact]
     let messages: [AppChatMessage]
+    let temporaryConnections: [TemporaryConnection]
+    let temporaryMessages: [TemporaryMessage]
 }
 
 struct AppProfile: Decodable {
@@ -115,6 +117,27 @@ struct AppChatMessage: Decodable, Identifiable, Hashable {
     let receivedAtUnix: UInt64?
 }
 
+struct TemporaryConnection: Decodable, Identifiable, Hashable {
+    let id: String
+    let displayName: String
+    let accountId: String
+    let deviceId: String
+    let safetyNumber: String
+    let lastMessage: String?
+    let updatedAtUnix: UInt64
+    let expiresUnix: UInt64
+}
+
+struct TemporaryMessage: Decodable, Identifiable, Hashable {
+    let id: String
+    let connectionId: String
+    let direction: AppMessageDirection
+    let body: String
+    let status: AppMessageStatus
+    let sentAtUnix: UInt64
+    let receivedAtUnix: UInt64?
+}
+
 enum AppMessageDirection: String, Decodable {
     case outgoing
     case incoming
@@ -132,6 +155,11 @@ struct InviteResponse: Decodable {
     let inviteUri: String
 }
 
+struct TemporaryInviteResponse: Decodable {
+    let inviteUri: String
+    let expiresUnix: UInt64
+}
+
 struct InvitePreview: Decodable, Equatable {
     let normalizedInviteUri: String
     let suggestedDisplayName: String
@@ -143,10 +171,16 @@ struct InvitePreview: Decodable, Equatable {
     let alreadyAdded: Bool
     let existingDisplayName: String?
     let verified: Bool
+    let temporary: Bool
 }
 
 struct ReceiveReport: Decodable {
     let receivedCount: Int
+    let snapshot: AppSnapshot
+}
+
+struct TemporaryStartResponse: Decodable {
+    let connectionId: String
     let snapshot: AppSnapshot
 }
 

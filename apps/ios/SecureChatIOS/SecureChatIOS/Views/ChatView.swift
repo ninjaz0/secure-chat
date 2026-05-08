@@ -18,7 +18,11 @@ struct ChatView: View {
                     LazyVStack(spacing: 10) {
                         ForEach(messages) { message in
                             MessageBubble(
-                                message: message,
+                                direction: message.direction,
+                                messageBody: message.body,
+                                status: message.status,
+                                sentAtUnix: message.sentAtUnix,
+                                receivedAtUnix: message.receivedAtUnix,
                                 showsStatus: store.showMessageStatus,
                                 showsTimestamp: store.showMessageTimestamps
                             )
@@ -57,6 +61,82 @@ struct ChatView: View {
     }
 }
 
+struct TemporaryChatView: View {
+    @EnvironmentObject private var store: SecureChatStore
+    @Environment(\.dismiss) private var dismiss
+    let connection: TemporaryConnection
+    @State private var draft = ""
+
+    private var currentConnection: TemporaryConnection {
+        store.appSnapshot?.temporaryConnections.first { $0.id == connection.id } ?? connection
+    }
+
+    private var messages: [TemporaryMessage] {
+        store.appSnapshot?.temporaryMessages.filter { $0.connectionId == connection.id } ?? []
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TemporarySafetyBanner(connection: currentConnection)
+            Divider()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        ForEach(messages) { message in
+                            MessageBubble(
+                                direction: message.direction,
+                                messageBody: message.body,
+                                status: message.status,
+                                sentAtUnix: message.sentAtUnix,
+                                receivedAtUnix: message.receivedAtUnix,
+                                showsStatus: store.showMessageStatus,
+                                showsTimestamp: store.showMessageTimestamps
+                            )
+                            .id(message.id)
+                        }
+                    }
+                    .padding(14)
+                }
+                .onChange(of: messages.count) { _ in
+                    if let last = messages.last {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
+            }
+            Divider()
+            ComposerView(draft: $draft) {
+                let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                draft = ""
+                Task { await store.sendTemporaryMessage(text) }
+            }
+        }
+        .navigationTitle(currentConnection.displayName)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button {
+                    Task { await store.receiveMessages() }
+                } label: {
+                    Image(systemName: "tray.and.arrow.down")
+                }
+
+                Button(role: .destructive) {
+                    Task {
+                        await store.endTemporaryConnection()
+                        dismiss()
+                    }
+                } label: {
+                    Image(systemName: "trash")
+                }
+            }
+        }
+        .onAppear {
+            store.selectedContactID = nil
+            store.selectedTemporaryConnectionID = connection.id
+        }
+    }
+}
+
 private struct SafetyBanner: View {
     let contact: AppContact
 
@@ -81,25 +161,64 @@ private struct SafetyBanner: View {
     }
 }
 
+private struct TemporarySafetyBanner: View {
+    let connection: TemporaryConnection
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "timer")
+                    .foregroundStyle(.orange)
+                Text("Temporary encrypted session")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text(expiryText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text(connection.safetyNumber)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .lineLimit(2)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+
+    private var expiryText: String {
+        let remaining = Int64(connection.expiresUnix) - Int64(Date().timeIntervalSince1970)
+        if remaining <= 0 { return "Expired" }
+        let minutes = max(1, remaining / 60)
+        if minutes < 60 { return "\(minutes)m left" }
+        return "\(minutes / 60)h left"
+    }
+}
+
 private struct MessageBubble: View {
-    let message: AppChatMessage
+    let direction: AppMessageDirection
+    let messageBody: String
+    let status: AppMessageStatus
+    let sentAtUnix: UInt64
+    let receivedAtUnix: UInt64?
     let showsStatus: Bool
     let showsTimestamp: Bool
 
     private var isOutgoing: Bool {
-        message.direction == .outgoing
+        direction == .outgoing
     }
 
     var body: some View {
         HStack {
             if isOutgoing { Spacer(minLength: 44) }
             VStack(alignment: .leading, spacing: 5) {
-                Text(message.body)
+                Text(messageBody)
                     .textSelection(.enabled)
                 if showsStatus || showsTimestamp {
                     HStack(spacing: 6) {
                         if showsStatus {
-                            Text(message.status.rawValue.capitalized)
+                            Text(status.rawValue.capitalized)
                         }
                         if showsTimestamp {
                             Text(messageTime)
@@ -120,7 +239,7 @@ private struct MessageBubble: View {
     }
 
     private var messageTime: String {
-        let unix = message.receivedAtUnix ?? message.sentAtUnix
+        let unix = receivedAtUnix ?? sentAtUnix
         return Self.timeFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(unix)))
     }
 

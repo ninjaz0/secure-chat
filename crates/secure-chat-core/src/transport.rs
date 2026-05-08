@@ -1,9 +1,13 @@
-use crate::crypto::{random_bytes, sha256, CryptoError};
+use crate::crypto::{base64_bytes, random_bytes, sha256, CryptoError};
 use crate::identity::{
     sign_bytes, verify_signature, AccountId, DeviceId, DeviceKeyMaterial, PublicDeviceIdentity,
 };
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
+use std::collections::{HashMap, VecDeque};
+
+pub const P2P_DIRECT_MAX_SKEW_SECS: u64 = 5 * 60;
+const P2P_DIRECT_REPLAY_CACHE_PER_DEVICE: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -49,6 +53,7 @@ pub struct TransportFrame {
     pub version: u8,
     pub kind: TransportKind,
     pub original_len: u32,
+    #[serde(with = "base64_bytes")]
     pub padded_body: Vec<u8>,
 }
 
@@ -61,9 +66,33 @@ pub struct P2pDirectDatagram {
     pub receiver_device_id: DeviceId,
     pub sent_unix: u64,
     pub nonce: [u8; 16],
+    #[serde(with = "base64_bytes")]
     pub frame: Vec<u8>,
     #[serde(with = "BigArray")]
     pub signature: [u8; 64],
+}
+
+#[derive(Default)]
+pub struct P2pDirectReplayCache {
+    seen: HashMap<DeviceId, VecDeque<[u8; 16]>>,
+}
+
+impl P2pDirectReplayCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn remember(&mut self, sender_device_id: DeviceId, nonce: [u8; 16]) -> Result<(), CryptoError> {
+        let nonces = self.seen.entry(sender_device_id).or_default();
+        if nonces.iter().any(|seen| *seen == nonce) {
+            return Err(CryptoError::ReplayOrDuplicate);
+        }
+        nonces.push_back(nonce);
+        while nonces.len() > P2P_DIRECT_REPLAY_CACHE_PER_DEVICE {
+            nonces.pop_front();
+        }
+        Ok(())
+    }
 }
 
 impl TransportFrame {
@@ -86,6 +115,9 @@ impl TransportFrame {
     }
 
     pub fn expose(&self) -> Result<Vec<u8>, CryptoError> {
+        if self.version != 1 {
+            return Err(CryptoError::InvalidInput);
+        }
         let len = self.original_len as usize;
         if len > self.padded_body.len() {
             return Err(CryptoError::InvalidInput);
@@ -134,6 +166,20 @@ impl P2pDirectDatagram {
             &self.signature_payload(),
             &self.signature,
         )
+    }
+
+    pub fn verify_fresh(
+        &self,
+        sender: &PublicDeviceIdentity,
+        receiver: &PublicDeviceIdentity,
+        now_unix: u64,
+        replay_cache: &mut P2pDirectReplayCache,
+    ) -> Result<(), CryptoError> {
+        self.verify(sender, receiver)?;
+        if self.sent_unix.abs_diff(now_unix) > P2P_DIRECT_MAX_SKEW_SECS {
+            return Err(CryptoError::InvalidInput);
+        }
+        replay_cache.remember(self.sender_device_id, self.nonce)
     }
 
     fn signature_payload(&self) -> Vec<u8> {
