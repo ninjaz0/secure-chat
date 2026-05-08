@@ -57,6 +57,64 @@ open apps/ios/SecureChatIOS/SecureChatIOS.xcodeproj
 5. 先运行一次 `./script/build_ios.sh debug`，确保 `dist/SecureChatFFI.xcframework` 已生成。
 6. 选择连接的 iPhone 或 iPad，点击 Run。
 
+## 安装到个人 iPhone 测试
+
+个人手机测试推荐直接用 Xcode 安装，不需要先上架 App Store。
+
+### 1. 准备手机
+
+1. iPhone 用数据线连接 Mac。
+2. iPhone 上点信任这台 Mac。
+3. 在 iPhone 上打开开发者模式：`设置` -> `隐私与安全性` -> `开发者模式`，打开后按提示重启。
+4. 确保 Mac 的 Xcode 能在顶部设备列表里看到这台 iPhone。
+
+### 2. 先生成 Rust iOS XCFramework
+
+在仓库根目录运行：
+
+```bash
+./script/build_ios.sh debug
+```
+
+这个命令会生成：
+
+```text
+dist/SecureChatFFI.xcframework
+```
+
+### 3. 配置 Xcode 签名
+
+1. 打开工程：
+
+   ```bash
+   open apps/ios/SecureChatIOS/SecureChatIOS.xcodeproj
+   ```
+
+2. 选择左侧项目 `SecureChatIOS`，再选择 target `SecureChatIOS`。
+3. 进入 `Signing & Capabilities`。
+4. 勾选 `Automatically manage signing`。
+5. `Team` 选择你的 Apple ID 或 Apple Developer Team。
+6. 把 `Bundle Identifier` 改成全网唯一值，例如：
+
+   ```text
+   com.yourname.securechat
+   ```
+
+### 4. 安装运行
+
+1. Xcode 顶部设备选择你的 iPhone。
+2. 点击 Run。
+3. 首次安装后，如果系统提示“不受信任的开发者”，到 iPhone：
+
+   ```text
+   设置 -> 通用 -> VPN 与设备管理
+   ```
+
+   信任你的开发者证书。
+4. 回到桌面打开 SecureChat。
+
+免费 Apple ID 通常会有个人签名有效期限制；过期后重新用 Xcode Run 一次即可。正式分发给更多人测试时，建议使用 Apple Developer Program 的 TestFlight。
+
 ## 和 macOS 客户端互联
 
 两端必须使用同一个 relay。公网部署可参考：

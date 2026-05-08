@@ -50,6 +50,22 @@ open apps/ios/SecureChatIOS/SecureChatIOS.xcodeproj
 The iOS project expects `dist/SecureChatFFI.xcframework`, which the script
 generates from the same `secure-chat-ffi` C ABI used by the macOS client.
 
+Regenerate app icons from a 1024px source image:
+
+```bash
+./script/generate_app_icons.py /path/to/source-icon.png
+```
+
+Create a local macOS release DMG:
+
+```bash
+./script/package_macos.sh
+```
+
+The generated DMG is written to `dist/SecureChatMac-0.1.0.dmg`. It is ad-hoc
+signed for local testing unless you replace the signing step with a Developer ID
+certificate and notarization flow.
+
 Run the Rust test suite:
 
 ```bash
