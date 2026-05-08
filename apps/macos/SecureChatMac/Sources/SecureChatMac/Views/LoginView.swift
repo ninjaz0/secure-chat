@@ -7,7 +7,7 @@ struct LoginView: View {
 
     var body: some View {
         VStack(spacing: 24) {
-            Image(systemName: "lock.bubble.left.and.bubble.right")
+            Image(systemName: "lock.fill")
                 .font(.system(size: 56))
                 .foregroundStyle(.secondary)
 
@@ -42,4 +42,3 @@ struct LoginView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
-

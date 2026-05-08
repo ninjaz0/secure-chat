@@ -31,7 +31,7 @@ struct LoginView: View {
             .navigationTitle("SecureChat")
             .safeAreaInset(edge: .top) {
                 VStack(spacing: 8) {
-                    Image(systemName: "lock.bubble.left.and.bubble.right")
+                    Image(systemName: "lock.fill")
                         .font(.system(size: 44))
                         .foregroundStyle(.secondary)
                     Text("Anonymous E2EE identity")
