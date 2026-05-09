@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_NAME="SecureChatMac"
 BUNDLE_ID="dev.local.securechat.mac"
-VERSION="${SECURE_CHAT_VERSION:-0.2.1}"
+VERSION="${SECURE_CHAT_VERSION:-0.2.2}"
 MIN_SYSTEM_VERSION="14.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,7 +18,6 @@ APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 ICON_FILE="$ROOT_DIR/apps/macos/SecureChatMac/Resources/SecureChatMac.icns"
-ENTITLEMENTS_FILE="$ROOT_DIR/apps/macos/SecureChatMac/Resources/SecureChatMac.entitlements"
 DMG_STAGING="$RELEASE_DIR/dmg-staging"
 DMG_PATH="$DIST_DIR/$APP_NAME-$VERSION.dmg"
 CARGO_BIN="${CARGO:-$HOME/.cargo/bin/cargo}"
@@ -67,7 +66,7 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundleShortVersionString</key>
   <string>$VERSION</string>
   <key>CFBundleVersion</key>
-  <string>3</string>
+  <string>4</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSPrincipalClass</key>
@@ -77,8 +76,8 @@ cat >"$INFO_PLIST" <<PLIST
 PLIST
 
 codesign --force --sign - "$APP_FRAMEWORKS/libsecure_chat_ffi.dylib"
-codesign --force --sign - --entitlements "$ENTITLEMENTS_FILE" "$APP_BINARY"
-codesign --force --sign - --entitlements "$ENTITLEMENTS_FILE" "$APP_BUNDLE"
+codesign --force --sign - "$APP_BINARY"
+codesign --force --sign - "$APP_BUNDLE"
 codesign --verify --deep --strict "$APP_BUNDLE"
 
 cp -R "$APP_BUNDLE" "$DMG_STAGING/"

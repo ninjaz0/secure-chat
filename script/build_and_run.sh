@@ -5,7 +5,7 @@ MODE="${1:-run}"
 APP_NAME="SecureChatMac"
 BUNDLE_ID="dev.local.securechat.mac"
 MIN_SYSTEM_VERSION="14.0"
-VERSION="${SECURE_CHAT_VERSION:-0.2.1}"
+VERSION="${SECURE_CHAT_VERSION:-0.2.2}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SWIFT_PACKAGE="$ROOT_DIR/apps/macos/SecureChatMac"
@@ -18,7 +18,6 @@ APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 ICON_FILE="$ROOT_DIR/apps/macos/SecureChatMac/Resources/SecureChatMac.icns"
-ENTITLEMENTS_FILE="$ROOT_DIR/apps/macos/SecureChatMac/Resources/SecureChatMac.entitlements"
 CARGO_BIN="${CARGO:-$HOME/.cargo/bin/cargo}"
 
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -65,7 +64,7 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundleShortVersionString</key>
   <string>$VERSION</string>
   <key>CFBundleVersion</key>
-  <string>3</string>
+  <string>4</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSPrincipalClass</key>
@@ -75,8 +74,8 @@ cat >"$INFO_PLIST" <<PLIST
 PLIST
 
 codesign --force --sign - "$APP_FRAMEWORKS/libsecure_chat_ffi.dylib" >/dev/null
-codesign --force --sign - --entitlements "$ENTITLEMENTS_FILE" "$APP_BINARY" >/dev/null
-codesign --force --sign - --entitlements "$ENTITLEMENTS_FILE" "$APP_BUNDLE" >/dev/null
+codesign --force --sign - "$APP_BINARY" >/dev/null
+codesign --force --sign - "$APP_BUNDLE" >/dev/null
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
