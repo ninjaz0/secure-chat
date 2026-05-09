@@ -84,8 +84,6 @@ struct AppSnapshot: Decodable {
     let profile: AppProfile?
     let contacts: [AppContact]
     let messages: [AppChatMessage]
-    let groups: [AppGroup]
-    let groupMessages: [AppGroupMessage]
     let temporaryConnections: [TemporaryConnection]
     let temporaryMessages: [TemporaryMessage]
     let stickers: [StickerItem]
@@ -114,26 +112,6 @@ struct AppContact: Decodable, Identifiable, Hashable {
 struct AppChatMessage: Decodable, Identifiable, Hashable {
     let id: String
     let contactId: String
-    let direction: AppMessageDirection
-    let body: String
-    let content: MessageContent
-    let status: AppMessageStatus
-    let sentAtUnix: UInt64
-    let receivedAtUnix: UInt64?
-}
-
-struct AppGroup: Decodable, Identifiable, Hashable {
-    let id: String
-    let displayName: String
-    let memberCount: Int
-    let lastMessage: String?
-    let updatedAtUnix: UInt64
-}
-
-struct AppGroupMessage: Decodable, Identifiable, Hashable {
-    let id: String
-    let groupId: String
-    let senderDisplayName: String
     let direction: AppMessageDirection
     let body: String
     let content: MessageContent

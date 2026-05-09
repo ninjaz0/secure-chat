@@ -20,7 +20,6 @@ import kotlinx.coroutines.withContext
 data class SecureChatUiState(
     val snapshot: AppSnapshot? = null,
     val selectedContactId: String? = null,
-    val selectedGroupId: String? = null,
     val selectedTemporaryConnectionId: String? = null,
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
@@ -55,12 +54,6 @@ class SecureChatViewModel(application: Application) : AndroidViewModel(applicati
     val selectedMessages: List<AppChatMessage>
         get() = uiState.snapshot?.messages?.filter { it.contactId == uiState.selectedContactId }.orEmpty()
 
-    val selectedGroup: AppGroup?
-        get() = uiState.snapshot?.groups?.firstOrNull { it.id == uiState.selectedGroupId }
-
-    val selectedGroupMessages: List<AppGroupMessage>
-        get() = uiState.snapshot?.groupMessages?.filter { it.groupId == uiState.selectedGroupId }.orEmpty()
-
     val selectedTemporaryConnection: TemporaryConnection?
         get() = uiState.snapshot?.temporaryConnections?.firstOrNull { it.id == uiState.selectedTemporaryConnectionId }
 
@@ -82,15 +75,11 @@ class SecureChatViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun selectContact(id: String) {
-        uiState = uiState.copy(selectedContactId = id, selectedGroupId = null, selectedTemporaryConnectionId = null)
-    }
-
-    fun selectGroup(id: String) {
-        uiState = uiState.copy(selectedContactId = null, selectedGroupId = id, selectedTemporaryConnectionId = null)
+        uiState = uiState.copy(selectedContactId = id, selectedTemporaryConnectionId = null)
     }
 
     fun selectTemporaryConnection(id: String) {
-        uiState = uiState.copy(selectedContactId = null, selectedGroupId = null, selectedTemporaryConnectionId = id)
+        uiState = uiState.copy(selectedContactId = null, selectedTemporaryConnectionId = id)
     }
 
     fun copyOwnInvite() {
@@ -129,7 +118,7 @@ class SecureChatViewModel(application: Application) : AndroidViewModel(applicati
         if (name.isEmpty()) return
         runCore {
             applySnapshot(callCore { client.updateContactDisplayName(contactId, name) })
-            uiState = uiState.copy(selectedContactId = contactId, selectedGroupId = null, selectedTemporaryConnectionId = null)
+            uiState = uiState.copy(selectedContactId = contactId, selectedTemporaryConnectionId = null)
         }
     }
 
@@ -146,7 +135,7 @@ class SecureChatViewModel(application: Application) : AndroidViewModel(applicati
         runCore {
             val response = callCore { client.startTemporaryConnection(inviteUri.trim()) }
             applySnapshot(response.snapshot)
-            uiState = uiState.copy(selectedContactId = null, selectedGroupId = null, selectedTemporaryConnectionId = response.connectionId)
+            uiState = uiState.copy(selectedContactId = null, selectedTemporaryConnectionId = response.connectionId)
             clearInvitePreview()
         }
     }
@@ -157,41 +146,7 @@ class SecureChatViewModel(application: Application) : AndroidViewModel(applicati
         if (text.isEmpty()) return
         runCore {
             applySnapshot(callCore { client.sendMessage(contactId, text) })
-            uiState = uiState.copy(selectedContactId = contactId, selectedGroupId = null, selectedTemporaryConnectionId = null)
-        }
-    }
-
-    fun createGroup(displayName: String, firstContactId: String? = null) {
-        val name = displayName.trim()
-        if (name.isEmpty()) return
-        runCore {
-            val snapshot = callCore { client.createGroup(name) }
-            applySnapshot(snapshot)
-            val groupId = snapshot.groups.firstOrNull { it.displayName == name }?.id
-                ?: snapshot.groups.firstOrNull()?.id
-            uiState = uiState.copy(selectedContactId = null, selectedGroupId = groupId, selectedTemporaryConnectionId = null)
-            if (groupId != null && firstContactId != null) {
-                applySnapshot(callCore { client.addGroupMember(groupId, firstContactId) })
-                uiState = uiState.copy(selectedContactId = null, selectedGroupId = groupId, selectedTemporaryConnectionId = null)
-            }
-        }
-    }
-
-    fun addContactToSelectedGroup(contactId: String) {
-        val groupId = uiState.selectedGroupId ?: return
-        runCore {
-            applySnapshot(callCore { client.addGroupMember(groupId, contactId) })
-            uiState = uiState.copy(selectedContactId = null, selectedGroupId = groupId, selectedTemporaryConnectionId = null)
-        }
-    }
-
-    fun sendGroupMessage(body: String) {
-        val groupId = uiState.selectedGroupId ?: return
-        val text = body.trim()
-        if (text.isEmpty()) return
-        runCore {
-            applySnapshot(callCore { client.sendGroupMessage(groupId, text) })
-            uiState = uiState.copy(selectedContactId = null, selectedGroupId = groupId, selectedTemporaryConnectionId = null)
+            uiState = uiState.copy(selectedContactId = contactId, selectedTemporaryConnectionId = null)
         }
     }
 
@@ -201,7 +156,7 @@ class SecureChatViewModel(application: Application) : AndroidViewModel(applicati
         if (text.isEmpty()) return
         runCore {
             applySnapshot(callCore { client.sendTemporaryMessage(connectionId, text) })
-            uiState = uiState.copy(selectedContactId = null, selectedGroupId = null, selectedTemporaryConnectionId = connectionId)
+            uiState = uiState.copy(selectedContactId = null, selectedTemporaryConnectionId = connectionId)
         }
     }
 
@@ -370,14 +325,11 @@ class SecureChatViewModel(application: Application) : AndroidViewModel(applicati
         val selectedContactId = uiState.selectedContactId
             ?.takeIf { id -> snapshot.contacts.any { it.id == id } }
             ?: snapshot.contacts.firstOrNull()?.id
-        val selectedGroupId = uiState.selectedGroupId
-            ?.takeIf { id -> snapshot.groups.any { it.id == id } }
         val selectedTemporaryConnectionId = uiState.selectedTemporaryConnectionId
             ?.takeIf { id -> snapshot.temporaryConnections.any { it.id == id } }
         uiState = uiState.copy(
             snapshot = snapshot,
-            selectedContactId = selectedContactId.takeIf { selectedTemporaryConnectionId == null && selectedGroupId == null },
-            selectedGroupId = selectedGroupId,
+            selectedContactId = selectedContactId.takeIf { selectedTemporaryConnectionId == null },
             selectedTemporaryConnectionId = selectedTemporaryConnectionId,
         )
     }
@@ -387,16 +339,14 @@ class SecureChatViewModel(application: Application) : AndroidViewModel(applicati
     private fun selectedThread(): SelectedThread? =
         when {
             uiState.selectedTemporaryConnectionId != null -> SelectedThread("temporary", uiState.selectedTemporaryConnectionId!!)
-            uiState.selectedGroupId != null -> SelectedThread("group", uiState.selectedGroupId!!)
             uiState.selectedContactId != null -> SelectedThread("contact", uiState.selectedContactId!!)
             else -> null
         }
 
     private fun restoreThread(thread: SelectedThread) {
         uiState = when (thread.kind) {
-            "temporary" -> uiState.copy(selectedContactId = null, selectedGroupId = null, selectedTemporaryConnectionId = thread.id)
-            "group" -> uiState.copy(selectedContactId = null, selectedGroupId = thread.id, selectedTemporaryConnectionId = null)
-            else -> uiState.copy(selectedContactId = thread.id, selectedGroupId = null, selectedTemporaryConnectionId = null)
+            "temporary" -> uiState.copy(selectedContactId = null, selectedTemporaryConnectionId = thread.id)
+            else -> uiState.copy(selectedContactId = thread.id, selectedTemporaryConnectionId = null)
         }
     }
 

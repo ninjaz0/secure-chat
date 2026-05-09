@@ -42,11 +42,6 @@
                     <SymbolIcon Symbol="Link" />
                 </AppBarButton.Icon>
             </AppBarButton>
-            <AppBarButton Label="New Group" Click="CreateGroup_Click">
-                <AppBarButton.Icon>
-                    <SymbolIcon Symbol="People" />
-                </AppBarButton.Icon>
-            </AppBarButton>
             <AppBarButton Label="Receive" Click="Receive_Click">
                 <AppBarButton.Icon>
                     <SymbolIcon Symbol="Refresh" />
@@ -100,7 +95,6 @@
                 <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="8">
                     <Button Content="Rename" Click="RenameContact_Click" />
                     <Button Content="Delete" Click="DeleteContact_Click" />
-                    <Button Content="Add member" Click="AddGroupMember_Click" />
                     <Button Content="End temp" Click="EndTemporary_Click" />
                 </StackPanel>
             </Grid>

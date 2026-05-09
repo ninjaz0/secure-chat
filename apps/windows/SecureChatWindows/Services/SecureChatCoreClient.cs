@@ -96,18 +96,6 @@ public sealed class SecureChatCoreClient
         Task.Run(() => With4(DataDirectory, threadKind, threadId, messageId,
             (dataDir, tKind, tId, message) => Decode<AppSnapshot>(Call(() => SecureChatNative.OpenBurnMessageJson(dataDir, tKind, tId, message)))));
 
-    public Task<AppSnapshot> CreateGroupAsync(string displayName) =>
-        Task.Run(() => With2(DataDirectory, displayName,
-            (dataDir, name) => Decode<AppSnapshot>(Call(() => SecureChatNative.CreateGroupJson(dataDir, name)))));
-
-    public Task<AppSnapshot> AddGroupMemberAsync(string groupId, string contactId) =>
-        Task.Run(() => With3(DataDirectory, groupId, contactId,
-            (dataDir, group, contact) => Decode<AppSnapshot>(Call(() => SecureChatNative.AddGroupMemberJson(dataDir, group, contact)))));
-
-    public Task<AppSnapshot> SendGroupMessageAsync(string groupId, string body) =>
-        Task.Run(() => With3(DataDirectory, groupId, body,
-            (dataDir, group, text) => Decode<AppSnapshot>(Call(() => SecureChatNative.SendGroupMessageJson(dataDir, group, text)))));
-
     public Task<AppSnapshot> RegisterPushTokenAsync(string token, string platform = "ios") =>
         Task.Run(() => With3(DataDirectory, token, platform,
             (dataDir, pushToken, pushPlatform) => Decode<AppSnapshot>(Call(() => SecureChatNative.RegisterPushTokenJson(dataDir, pushToken, pushPlatform)))));

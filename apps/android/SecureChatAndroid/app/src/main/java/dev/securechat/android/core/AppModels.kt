@@ -64,8 +64,6 @@ data class AppSnapshot(
     val profile: AppProfile? = null,
     val contacts: List<AppContact> = emptyList(),
     val messages: List<AppChatMessage> = emptyList(),
-    val groups: List<AppGroup> = emptyList(),
-    @SerialName("group_messages") val groupMessages: List<AppGroupMessage> = emptyList(),
     @SerialName("temporary_connections") val temporaryConnections: List<TemporaryConnection> = emptyList(),
     @SerialName("temporary_messages") val temporaryMessages: List<TemporaryMessage> = emptyList(),
     val stickers: List<StickerItem> = emptyList(),
@@ -97,28 +95,6 @@ data class AppContact(
 data class AppChatMessage(
     val id: String,
     @SerialName("contact_id") val contactId: String,
-    val direction: AppMessageDirection,
-    val body: String,
-    val content: MessageContent = MessageContent(text = body),
-    val status: AppMessageStatus,
-    @SerialName("sent_at_unix") val sentAtUnix: Long,
-    @SerialName("received_at_unix") val receivedAtUnix: Long? = null,
-)
-
-@Serializable
-data class AppGroup(
-    val id: String,
-    @SerialName("display_name") val displayName: String,
-    @SerialName("member_count") val memberCount: Int,
-    @SerialName("last_message") val lastMessage: String? = null,
-    @SerialName("updated_at_unix") val updatedAtUnix: Long,
-)
-
-@Serializable
-data class AppGroupMessage(
-    val id: String,
-    @SerialName("group_id") val groupId: String,
-    @SerialName("sender_display_name") val senderDisplayName: String,
     val direction: AppMessageDirection,
     val body: String,
     val content: MessageContent = MessageContent(text = body),

@@ -64,15 +64,6 @@ internal static class SecureChatNative
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "secure_chat_app_open_burn_message_json")]
     internal static extern IntPtr OpenBurnMessageJson(IntPtr dataDir, IntPtr threadKind, IntPtr threadId, IntPtr messageId);
 
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "secure_chat_app_create_group_json")]
-    internal static extern IntPtr CreateGroupJson(IntPtr dataDir, IntPtr displayName);
-
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "secure_chat_app_add_group_member_json")]
-    internal static extern IntPtr AddGroupMemberJson(IntPtr dataDir, IntPtr groupId, IntPtr contactId);
-
-    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "secure_chat_app_send_group_message_json")]
-    internal static extern IntPtr SendGroupMessageJson(IntPtr dataDir, IntPtr groupId, IntPtr body);
-
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "secure_chat_app_register_push_token_json")]
     internal static extern IntPtr RegisterPushTokenJson(IntPtr dataDir, IntPtr token, IntPtr platform);
 

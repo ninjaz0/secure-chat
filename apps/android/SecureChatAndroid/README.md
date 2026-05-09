@@ -4,7 +4,7 @@ Native Android client for SecureChat. It uses the same Rust E2EE core as macOS a
 
 ## Features
 
-- Anonymous login, contacts, invite import/copy, one-to-one chat, group chat, temporary sessions, relay settings, background polling, and message status display.
+- Anonymous login, contacts, invite import/copy, one-to-one chat, temporary sessions, relay settings, background polling, and message status display.
 - Contact nickname editing and local strong delete for contacts, one-to-one history, ratchet state, and unfinished attachment state.
 - Text with Unicode emoji, image/file attachments, locally imported sticker images/GIFs, and burn-after-reading messages.
 - A dedicated chat `LazyColumn` follows new messages only when the user is already near the bottom; history review is not interrupted and shows a lightweight new-message button.

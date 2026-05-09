@@ -13,7 +13,6 @@ public sealed class ConversationItem
     public string Title { get; init; } = "";
     public string Subtitle { get; init; } = "";
     public string SafetyNumber { get; init; } = "";
-    public bool IsGroup => ThreadKind == "group";
     public bool IsTemporary => ThreadKind == "temporary";
     public override string ToString() => Title;
 }
@@ -226,23 +225,6 @@ public sealed class MainViewModel : ObservableObject
         });
     }
 
-    public async Task CreateGroupAsync(string name)
-    {
-        await RunAsync("Creating group", async () =>
-        {
-            ApplySnapshot(await client.CreateGroupAsync(name.Trim()));
-        });
-    }
-
-    public async Task AddContactToSelectedGroupAsync(string contactId)
-    {
-        if (SelectedConversation?.ThreadKind != "group") return;
-        await RunAsync("Adding group member", async () =>
-        {
-            ApplySnapshot(await client.AddGroupMemberAsync(SelectedConversation.ThreadId, contactId));
-        });
-    }
-
     public async Task SendTextAsync(string body)
     {
         if (SelectedConversation is null || string.IsNullOrWhiteSpace(body)) return;
@@ -251,7 +233,6 @@ public sealed class MainViewModel : ObservableObject
         {
             var next = conversation.ThreadKind switch
             {
-                "group" => await client.SendGroupMessageAsync(conversation.ThreadId, body),
                 "temporary" => await client.SendTemporaryMessageAsync(conversation.ThreadId, body),
                 _ => await client.SendMessageAsync(conversation.ThreadId, body),
             };
@@ -374,17 +355,6 @@ public sealed class MainViewModel : ObservableObject
             });
         }
 
-        foreach (var group in Snapshot.Groups.OrderByDescending(g => g.UpdatedAtUnix))
-        {
-            Conversations.Add(new ConversationItem
-            {
-                ThreadKind = "group",
-                ThreadId = group.Id,
-                Title = $"# {group.DisplayName}",
-                Subtitle = $"{group.MemberCount} members · {group.LastMessage ?? "No messages"}",
-            });
-        }
-
         foreach (var temporary in Snapshot.TemporaryConnections.OrderByDescending(t => t.UpdatedAtUnix))
         {
             Conversations.Add(new ConversationItem
@@ -409,10 +379,6 @@ public sealed class MainViewModel : ObservableObject
 
         IEnumerable<MessageItem> messages = SelectedConversation.ThreadKind switch
         {
-            "group" => Snapshot.GroupMessages
-                .Where(m => m.GroupId == SelectedConversation.ThreadId)
-                .OrderBy(m => m.SentAtUnix)
-                .Select(m => FromGroupMessage(m)),
             "temporary" => Snapshot.TemporaryMessages
                 .Where(m => m.ConnectionId == SelectedConversation.ThreadId)
                 .OrderBy(m => m.SentAtUnix)
@@ -483,22 +449,6 @@ public sealed class MainViewModel : ObservableObject
             IsBurnMessage = message.Content.Kind == "burn" && !message.Content.Destroyed,
         };
 
-    private static MessageItem FromGroupMessage(AppGroupMessage message) =>
-        new()
-        {
-            Id = message.Id,
-            ThreadKind = "group",
-            ThreadId = message.GroupId,
-            IsOutgoing = message.Direction == AppMessageDirection.Outgoing,
-            SenderLine = message.Direction == AppMessageDirection.Outgoing ? "You" : message.SenderDisplayName,
-            DisplayText = DisplayText(message.Body, message.Content),
-            AttachmentSummary = AttachmentSummary(message.Content.Attachment),
-            LocalPath = message.Content.Attachment?.LocalPath,
-            PreviewImage = PreviewImage(message.Content),
-            StatusLine = $"{message.Status} · {UnixTime(message.SentAtUnix)}",
-            IsBurnMessage = message.Content.Kind == "burn" && !message.Content.Destroyed,
-        };
-
     private MessageItem FromTemporaryMessage(TemporaryMessage message) =>
         new()
         {
@@ -556,7 +506,7 @@ public sealed class MainViewModel : ObservableObject
     }
 
     private static int CountMessages(AppSnapshot value) =>
-        value.Messages.Count + value.GroupMessages.Count + value.TemporaryMessages.Count;
+        value.Messages.Count + value.TemporaryMessages.Count;
 
     private static bool CanAppend(IReadOnlyList<MessageItem> current, IReadOnlyList<MessageItem> next)
     {

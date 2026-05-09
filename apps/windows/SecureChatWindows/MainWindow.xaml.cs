@@ -103,15 +103,6 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async void CreateGroup_Click(object sender, RoutedEventArgs e)
-    {
-        var name = await PromptAsync("New group", "Group name");
-        if (!string.IsNullOrWhiteSpace(name))
-        {
-            await ViewModel.CreateGroupAsync(name);
-        }
-    }
-
     private async void RenameContact_Click(object sender, RoutedEventArgs e)
     {
         var name = await PromptAsync("Rename contact", "New nickname");
@@ -128,17 +119,6 @@ public sealed partial class MainWindow : Window
         if (confirmed)
         {
             await ViewModel.DeleteSelectedContactAsync();
-        }
-    }
-
-    private async void AddGroupMember_Click(object sender, RoutedEventArgs e)
-    {
-        if (ViewModel.SelectedConversation?.ThreadKind != "group") return;
-        var names = ViewModel.Snapshot.Contacts.Select(c => $"{c.DisplayName} ({c.Id})");
-        var value = await PromptAsync("Add group member", "Paste contact id", string.Join(Environment.NewLine, names));
-        if (!string.IsNullOrWhiteSpace(value))
-        {
-            await ViewModel.AddContactToSelectedGroupAsync(value.Trim());
         }
     }
 

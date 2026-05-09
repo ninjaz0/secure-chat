@@ -242,46 +242,6 @@ enum SecureChatCoreClient {
         }
     }
 
-    static func createGroup(displayName: String) throws -> AppSnapshot {
-        let dataDir = appDataDirectory
-        return try dataDir.withCString { dataDirPtr in
-            try displayName.withCString { displayNamePtr in
-                try decodeCString(
-                    secure_chat_app_create_group_json(dataDirPtr, displayNamePtr),
-                    as: AppSnapshot.self
-                )
-            }
-        }
-    }
-
-    static func addGroupMember(groupID: String, contactID: String) throws -> AppSnapshot {
-        let dataDir = appDataDirectory
-        return try dataDir.withCString { dataDirPtr in
-            try groupID.withCString { groupPtr in
-                try contactID.withCString { contactPtr in
-                    try decodeCString(
-                        secure_chat_app_add_group_member_json(dataDirPtr, groupPtr, contactPtr),
-                        as: AppSnapshot.self
-                    )
-                }
-            }
-        }
-    }
-
-    static func sendGroupMessage(groupID: String, body: String) throws -> AppSnapshot {
-        let dataDir = appDataDirectory
-        return try dataDir.withCString { dataDirPtr in
-            try groupID.withCString { groupPtr in
-                try body.withCString { bodyPtr in
-                    try decodeCString(
-                        secure_chat_app_send_group_message_json(dataDirPtr, groupPtr, bodyPtr),
-                        as: AppSnapshot.self
-                    )
-                }
-            }
-        }
-    }
-
     static func registerPushToken(_ token: String, platform: String) throws -> AppSnapshot {
         let dataDir = appDataDirectory
         return try dataDir.withCString { dataDirPtr in

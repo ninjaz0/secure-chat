@@ -44,12 +44,6 @@ public sealed class AppSnapshot
     [JsonPropertyName("messages")]
     public List<AppChatMessage> Messages { get; set; } = new();
 
-    [JsonPropertyName("groups")]
-    public List<AppGroup> Groups { get; set; } = new();
-
-    [JsonPropertyName("group_messages")]
-    public List<AppGroupMessage> GroupMessages { get; set; } = new();
-
     [JsonPropertyName("temporary_connections")]
     public List<TemporaryConnection> TemporaryConnections { get; set; } = new();
 
@@ -115,54 +109,6 @@ public sealed class AppChatMessage
 
     [JsonPropertyName("contact_id")]
     public string ContactId { get; set; } = "";
-
-    [JsonPropertyName("direction")]
-    public AppMessageDirection Direction { get; set; }
-
-    [JsonPropertyName("body")]
-    public string Body { get; set; } = "";
-
-    [JsonPropertyName("content")]
-    public MessageContent Content { get; set; } = new();
-
-    [JsonPropertyName("status")]
-    public AppMessageStatus Status { get; set; }
-
-    [JsonPropertyName("sent_at_unix")]
-    public ulong SentAtUnix { get; set; }
-
-    [JsonPropertyName("received_at_unix")]
-    public ulong? ReceivedAtUnix { get; set; }
-}
-
-public sealed class AppGroup
-{
-    [JsonPropertyName("id")]
-    public string Id { get; set; } = "";
-
-    [JsonPropertyName("display_name")]
-    public string DisplayName { get; set; } = "";
-
-    [JsonPropertyName("member_count")]
-    public int MemberCount { get; set; }
-
-    [JsonPropertyName("last_message")]
-    public string? LastMessage { get; set; }
-
-    [JsonPropertyName("updated_at_unix")]
-    public ulong UpdatedAtUnix { get; set; }
-}
-
-public sealed class AppGroupMessage
-{
-    [JsonPropertyName("id")]
-    public string Id { get; set; } = "";
-
-    [JsonPropertyName("group_id")]
-    public string GroupId { get; set; } = "";
-
-    [JsonPropertyName("sender_display_name")]
-    public string SenderDisplayName { get; set; } = "";
 
     [JsonPropertyName("direction")]
     public AppMessageDirection Direction { get; set; }

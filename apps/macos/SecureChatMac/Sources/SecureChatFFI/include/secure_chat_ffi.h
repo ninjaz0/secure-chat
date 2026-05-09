@@ -25,9 +25,6 @@ char *secure_chat_app_send_message_json(const char *data_dir, const char *contac
 char *secure_chat_app_send_attachment_json(const char *data_dir, const char *thread_kind, const char *thread_id, const char *file_path, const char *kind);
 char *secure_chat_app_send_burn_message_json(const char *data_dir, const char *thread_kind, const char *thread_id, const char *body);
 char *secure_chat_app_open_burn_message_json(const char *data_dir, const char *thread_kind, const char *thread_id, const char *message_id);
-char *secure_chat_app_create_group_json(const char *data_dir, const char *display_name);
-char *secure_chat_app_add_group_member_json(const char *data_dir, const char *group_id, const char *contact_id);
-char *secure_chat_app_send_group_message_json(const char *data_dir, const char *group_id, const char *body);
 char *secure_chat_app_register_push_token_json(const char *data_dir, const char *token, const char *platform);
 char *secure_chat_app_import_sticker_json(const char *data_dir, const char *file_path, const char *display_name);
 char *secure_chat_app_delete_sticker_json(const char *data_dir, const char *sticker_id);

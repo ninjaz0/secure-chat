@@ -4,7 +4,6 @@ struct ConversationListView: View {
     @EnvironmentObject private var store: SecureChatStore
     @State private var showingInvite = false
     @State private var showingAddContact = false
-    @State private var showingCreateGroup = false
     @State private var showingTemporary = false
     @State private var showingSettings = false
 
@@ -29,16 +28,6 @@ struct ConversationListView: View {
                             ChatView(contact: contact)
                         } label: {
                             ContactRow(contact: contact)
-                        }
-                    }
-                }
-
-                Section("Groups") {
-                    ForEach(store.appSnapshot?.groups ?? []) { group in
-                        NavigationLink {
-                            GroupChatView(group: group)
-                        } label: {
-                            GroupRow(group: group)
                         }
                     }
                 }
@@ -75,12 +64,6 @@ struct ConversationListView: View {
                     }
 
                     Button {
-                        showingCreateGroup = true
-                    } label: {
-                        Image(systemName: "person.3")
-                    }
-
-                    Button {
                         showingSettings = true
                     } label: {
                         Image(systemName: "gearshape")
@@ -96,10 +79,6 @@ struct ConversationListView: View {
             }
             .sheet(isPresented: $showingAddContact) {
                 AddContactView()
-                    .environmentObject(store)
-            }
-            .sheet(isPresented: $showingCreateGroup) {
-                CreateGroupView()
                     .environmentObject(store)
             }
             .sheet(isPresented: $showingTemporary) {
@@ -126,26 +105,6 @@ private struct ContactRow: View {
                 Text(contact.displayName)
                     .lineLimit(1)
                 Text(contact.lastMessage ?? "Device \(shortDevice(contact.deviceId))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-    }
-}
-
-private struct GroupRow: View {
-    let group: AppGroup
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "person.3.fill")
-                .foregroundStyle(.secondary)
-                .frame(width: 24)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(group.displayName)
-                    .lineLimit(1)
-                Text(group.lastMessage ?? "\(group.memberCount) members")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -182,55 +141,6 @@ private struct TemporaryRow: View {
         if remaining <= 0 { return "Expired" }
         let hours = max(1, remaining / 3600)
         return "\(hours)h"
-    }
-}
-
-private struct CreateGroupView: View {
-    @EnvironmentObject private var store: SecureChatStore
-    @Environment(\.dismiss) private var dismiss
-    @State private var name = ""
-    @State private var firstContactID = ""
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Group") {
-                    TextField("Group name", text: $name)
-                    Picker("First member", selection: $firstContactID) {
-                        Text("None").tag("")
-                        ForEach(store.appSnapshot?.contacts ?? []) { contact in
-                            Text(contact.displayName).tag(contact.id)
-                        }
-                    }
-                }
-
-                Section {
-                    Button {
-                        Task { await create() }
-                    } label: {
-                        Label("Create Group", systemImage: "person.3")
-                    }
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-            .navigationTitle("Group")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Cancel") { dismiss() }
-                }
-            }
-        }
-    }
-
-    private func create() async {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        await store.createGroup(displayName: trimmed)
-        if !firstContactID.isEmpty {
-            store.selectedContactID = firstContactID
-            await store.addSelectedContactToSelectedGroup()
-        }
-        dismiss()
     }
 }
 

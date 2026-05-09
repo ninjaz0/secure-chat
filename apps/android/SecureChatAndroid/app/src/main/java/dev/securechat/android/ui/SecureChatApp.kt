@@ -82,8 +82,6 @@ import androidx.compose.ui.unit.dp
 import dev.securechat.android.core.AttachmentContent
 import dev.securechat.android.core.AppChatMessage
 import dev.securechat.android.core.AppContact
-import dev.securechat.android.core.AppGroup
-import dev.securechat.android.core.AppGroupMessage
 import dev.securechat.android.core.AppMessageDirection
 import dev.securechat.android.core.AppMessageStatus
 import dev.securechat.android.core.InvitePreview
@@ -172,7 +170,6 @@ private fun MainShell(viewModel: SecureChatViewModel, state: SecureChatUiState) 
     var tab by rememberSaveable { mutableStateOf(MainTab.Chats) }
     var showingInvite by rememberSaveable { mutableStateOf(false) }
     var showingAddContact by rememberSaveable { mutableStateOf(false) }
-    var showingCreateGroup by rememberSaveable { mutableStateOf(false) }
     var showingTemporary by rememberSaveable { mutableStateOf(false) }
 
     Scaffold(
@@ -197,9 +194,6 @@ private fun MainShell(viewModel: SecureChatViewModel, state: SecureChatUiState) 
                     }
                     IconButton(onClick = { showingAddContact = true }) {
                         Icon(Icons.Filled.PersonAdd, contentDescription = "Add")
-                    }
-                    IconButton(onClick = { showingCreateGroup = true }) {
-                        Icon(Icons.Filled.PersonAdd, contentDescription = "Group")
                     }
                 },
             )
@@ -261,13 +255,6 @@ private fun MainShell(viewModel: SecureChatViewModel, state: SecureChatUiState) 
             },
         )
     }
-    if (showingCreateGroup) {
-        CreateGroupDialog(
-            viewModel = viewModel,
-            contacts = state.snapshot?.contacts.orEmpty(),
-            onDismiss = { showingCreateGroup = false },
-        )
-    }
     if (showingTemporary) {
         TemporaryDialog(
             viewModel = viewModel,
@@ -294,16 +281,6 @@ private fun ChatWorkbench(viewModel: SecureChatViewModel, state: SecureChatUiSta
                 contact = contact,
                 selected = contact.id == state.selectedContactId,
                 onClick = { viewModel.selectContact(contact.id) },
-            )
-        }
-        item {
-            Text("Groups", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        }
-        items(state.snapshot?.groups.orEmpty(), key = { it.id }) { group ->
-            GroupRow(
-                group = group,
-                selected = group.id == state.selectedGroupId,
-                onClick = { viewModel.selectGroup(group.id) },
             )
         }
         item {
@@ -373,33 +350,11 @@ private fun TemporaryRow(connection: TemporaryConnection, selected: Boolean, onC
 }
 
 @Composable
-private fun GroupRow(group: AppGroup, selected: Boolean, onClick: () -> Unit) {
-    Card(
-        shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant
-        ),
-        modifier = Modifier.clickable(onClick = onClick),
-    ) {
-        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(group.displayName, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                Text(group.lastMessage ?: "${group.memberCount} members", maxLines = 1)
-            }
-            AssistChip(onClick = {}, label = { Text("MLS") })
-        }
-    }
-}
-
-@Composable
 private fun ChatPanel(viewModel: SecureChatViewModel, state: SecureChatUiState) {
     val temporary = viewModel.selectedTemporaryConnection
-    val group = viewModel.selectedGroup
     val contact = viewModel.selectedContact
     if (temporary != null) {
         TemporaryChatPanel(viewModel, state, temporary, viewModel.selectedTemporaryMessages)
-    } else if (group != null) {
-        GroupChatPanel(viewModel, state, group, viewModel.selectedGroupMessages)
     } else if (contact != null) {
         ContactChatPanel(viewModel, state, contact, viewModel.selectedMessages)
     } else {
@@ -429,27 +384,6 @@ private fun ContactChatPanel(
         onSend = viewModel::sendMessage,
         onRenameContact = { viewModel.updateContactDisplayName(contact.id, it) },
         onDeleteContact = { viewModel.deleteContact(contact.id) },
-    )
-}
-
-@Composable
-private fun GroupChatPanel(
-    viewModel: SecureChatViewModel,
-    state: SecureChatUiState,
-    group: AppGroup,
-    messages: List<AppGroupMessage>,
-) {
-    ChatContainer(
-        viewModel = viewModel,
-        threadId = group.id,
-        title = group.displayName,
-        safetyNumber = "${group.memberCount} MLS members",
-        temporary = false,
-        messages = messages,
-        stickers = state.snapshot?.stickers.orEmpty(),
-        showStatus = state.showMessageStatus,
-        showTimestamp = state.showMessageTimestamps,
-        onSend = viewModel::sendGroupMessage,
     )
 }
 
@@ -606,17 +540,6 @@ private fun <T> ChatContainer(
                                 onOpenBurn = viewModel::openBurnMessage,
                             )
                             is TemporaryMessage -> MessageBubble(
-                                messageId = message.id,
-                                direction = message.direction,
-                                body = message.body,
-                                content = message.content,
-                                status = message.status,
-                                unix = message.receivedAtUnix ?: message.sentAtUnix,
-                                showStatus = showStatus,
-                                showTimestamp = showTimestamp,
-                                onOpenBurn = viewModel::openBurnMessage,
-                            )
-                            is AppGroupMessage -> MessageBubble(
                                 messageId = message.id,
                                 direction = message.direction,
                                 body = message.body,
@@ -903,7 +826,6 @@ private fun Any?.chatItemId(): String =
     when (this) {
         is AppChatMessage -> id
         is TemporaryMessage -> id
-        is AppGroupMessage -> id
         null -> ""
         else -> hashCode().toString()
     }
@@ -912,7 +834,6 @@ private fun Any?.chatItemDirection(): AppMessageDirection? =
     when (this) {
         is AppChatMessage -> direction
         is TemporaryMessage -> direction
-        is AppGroupMessage -> direction
         else -> null
     }
 
@@ -1006,56 +927,6 @@ private fun AddContactDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel") }
         },
-    )
-}
-
-@Composable
-private fun CreateGroupDialog(
-    viewModel: SecureChatViewModel,
-    contacts: List<AppContact>,
-    onDismiss: () -> Unit,
-) {
-    var name by rememberSaveable { mutableStateOf("") }
-    var firstContactId by rememberSaveable { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Create Group") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("Group name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                contacts.forEach { contact ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { firstContactId = contact.id }
-                            .padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(contact.displayName, modifier = Modifier.weight(1f))
-                        AssistChip(
-                            onClick = { firstContactId = contact.id },
-                            label = { Text(if (firstContactId == contact.id) "Selected" else "Add") },
-                        )
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = {
-                    viewModel.createGroup(name, firstContactId.ifBlank { null })
-                    onDismiss()
-                },
-                enabled = name.isNotBlank(),
-            ) { Text("Create") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
 

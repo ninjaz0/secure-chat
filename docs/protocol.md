@@ -110,7 +110,7 @@ so the recipient does not need to own the same pack.
 Burn-after-reading v1 is "destroy on open". When a receiver opens a burn message,
 the runtime replaces the local encrypted body with a destroyed placeholder,
 removes associated attachment files when present, and sends an encrypted destroy
-notice back to the peer or group members. Destroy notices are delivered through
+notice back to the peer. Destroy notices are delivered through
 the normal relay queue and therefore are best effort within relay TTL.
 
 ## Out-Of-Band Verification
