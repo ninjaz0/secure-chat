@@ -498,7 +498,11 @@ impl DesktopRuntime {
             sent_at_unix: now_unix(),
             body: body.to_string(),
         })?;
-        let envelope = RelayEnvelope { initial, wire };
+        let envelope = RelayEnvelope {
+            temporary: true,
+            initial,
+            wire,
+        };
         let payload = serde_json::to_vec(&envelope)?;
         let frame = TransportFrame::protect(&payload, &padding_profile(payload.len()))?;
         let relay_ciphertext = serde_json::to_vec(&frame)?;
@@ -771,8 +775,12 @@ impl DesktopRuntime {
             }
             let envelope: RelayEnvelope = serde_json::from_slice(&exposed)?;
             let remote_device_id = envelope.wire.sender_device_id;
-            let contact = runtime.contact_by_device(&remote_device_id.to_string())?;
-            let mut temporary_connection = if contact.is_none() {
+            let mut contact = if envelope.temporary {
+                None
+            } else {
+                runtime.contact_by_device(&remote_device_id.to_string())?
+            };
+            let mut temporary_connection = if envelope.temporary {
                 runtime.temporary_connection_by_device(&remote_device_id.to_string())?
             } else {
                 None
@@ -803,6 +811,9 @@ impl DesktopRuntime {
             let mut session = session.ok_or(DesktopError::ContactNotFound)?;
             let plain = session.decrypt(&envelope.wire)?;
             let handled_control = runtime.handle_group_control(&plain.body, &storage_key)?;
+            if contact.is_none() && !envelope.temporary && new_incoming_session {
+                contact = Some(runtime.create_incoming_contact(&keys, &session.remote_identity)?);
+            }
             if let Some(contact) = contact {
                 runtime.save_session(&contact.id, &session)?;
                 if !handled_control {
@@ -943,7 +954,11 @@ impl DesktopRuntime {
             sent_at_unix: now_unix(),
             body: body.to_string(),
         })?;
-        let envelope = RelayEnvelope { initial, wire };
+        let envelope = RelayEnvelope {
+            temporary: false,
+            initial,
+            wire,
+        };
         let payload = serde_json::to_vec(&envelope)?;
         let frame = TransportFrame::protect(&payload, &padding_profile(payload.len()))?;
         let relay_ciphertext = serde_json::to_vec(&frame)?;
@@ -1232,6 +1247,41 @@ impl DesktopRuntime {
                 remote.account_id.to_string(),
                 remote.device_id.to_string(),
                 invite_uri,
+                safety.number,
+                remote_identity_json,
+                now
+            ],
+        )?;
+        self.contact_by_device(&remote.device_id.to_string())?
+            .ok_or(DesktopError::ContactNotFound)
+    }
+
+    fn create_incoming_contact(
+        &self,
+        keys: &DeviceKeyMaterial,
+        remote: &PublicDeviceIdentity,
+    ) -> Result<ContactRecord, DesktopError> {
+        let suffix = remote
+            .device_id
+            .to_string()
+            .chars()
+            .take(8)
+            .collect::<String>();
+        let display_name = format!("Contact {suffix}");
+        let safety = safety_number(&[keys.public_identity()], std::slice::from_ref(remote));
+        let id = Uuid::new_v4().to_string();
+        let now = now_unix();
+        let storage_key = self.load_storage_key()?;
+        let remote_identity_json = encrypt_text(&storage_key, &serde_json::to_string(remote)?)?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO contacts
+             (id, display_name, account_id, device_id, invite_uri, safety_number, verified, remote_identity_json, created_at_unix, updated_at_unix)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, 0, ?6, ?7, ?7)",
+            params![
+                id,
+                display_name,
+                remote.account_id.to_string(),
+                remote.device_id.to_string(),
                 safety.number,
                 remote_identity_json,
                 now
@@ -2450,6 +2500,114 @@ fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_data_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("secure-chat-{label}-{}", Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn regular_invite_reply_creates_normal_contact_for_invite_owner() {
+        let (addr, handle) = secure_chat_relay::spawn_ephemeral().await.unwrap();
+        let relay_url = format!("http://{addr}");
+        let alice_dir = test_data_dir("alice-regular");
+        let bob_dir = test_data_dir("bob-regular");
+
+        DesktopRuntime::bootstrap(&alice_dir, "Alice", &relay_url)
+            .await
+            .unwrap();
+        DesktopRuntime::bootstrap(&bob_dir, "Bob", &relay_url)
+            .await
+            .unwrap();
+
+        let alice_invite = DesktopRuntime::invite(&alice_dir).unwrap().invite_uri;
+        let bob_snapshot = DesktopRuntime::add_contact(&bob_dir, "Alice", &alice_invite).unwrap();
+        let alice_contact_id = bob_snapshot.contacts[0].id.clone();
+        DesktopRuntime::send_message(&bob_dir, &alice_contact_id, "hello from Bob")
+            .await
+            .unwrap();
+
+        let alice_report = DesktopRuntime::receive(&alice_dir).await.unwrap();
+        assert_eq!(alice_report.received_count, 1);
+        assert_eq!(alice_report.snapshot.contacts.len(), 1);
+        assert!(alice_report.snapshot.temporary_connections.is_empty());
+        assert_eq!(alice_report.snapshot.messages.len(), 1);
+        assert_eq!(alice_report.snapshot.messages[0].body, "hello from Bob");
+
+        let bob_contact_id = alice_report.snapshot.contacts[0].id.clone();
+        DesktopRuntime::send_message(&alice_dir, &bob_contact_id, "hi Bob")
+            .await
+            .unwrap();
+        let bob_report = DesktopRuntime::receive(&bob_dir).await.unwrap();
+        assert_eq!(bob_report.received_count, 1);
+        assert!(bob_report
+            .snapshot
+            .messages
+            .iter()
+            .any(|message| message.body == "hi Bob"));
+
+        let temporary_invite = DesktopRuntime::temporary_invite(&alice_dir)
+            .unwrap()
+            .invite_uri;
+        let temporary_start =
+            DesktopRuntime::start_temporary_connection(&bob_dir, &temporary_invite).unwrap();
+        DesktopRuntime::send_temporary_message(
+            &bob_dir,
+            &temporary_start.connection_id,
+            "temporary side channel",
+        )
+        .await
+        .unwrap();
+        let temporary_report = DesktopRuntime::receive(&alice_dir).await.unwrap();
+        assert_eq!(temporary_report.received_count, 1);
+        assert_eq!(temporary_report.snapshot.contacts.len(), 1);
+        assert_eq!(temporary_report.snapshot.temporary_connections.len(), 1);
+        assert!(temporary_report
+            .snapshot
+            .temporary_messages
+            .iter()
+            .any(|message| message.body == "temporary side channel"));
+
+        handle.abort();
+        let _ = fs::remove_dir_all(alice_dir);
+        let _ = fs::remove_dir_all(bob_dir);
+    }
+
+    #[tokio::test]
+    async fn temporary_invite_reply_stays_in_temporary_connections() {
+        let (addr, handle) = secure_chat_relay::spawn_ephemeral().await.unwrap();
+        let relay_url = format!("http://{addr}");
+        let alice_dir = test_data_dir("alice-temporary");
+        let bob_dir = test_data_dir("bob-temporary");
+
+        DesktopRuntime::bootstrap(&alice_dir, "Alice", &relay_url)
+            .await
+            .unwrap();
+        DesktopRuntime::bootstrap(&bob_dir, "Bob", &relay_url)
+            .await
+            .unwrap();
+
+        let alice_invite = DesktopRuntime::temporary_invite(&alice_dir)
+            .unwrap()
+            .invite_uri;
+        let start = DesktopRuntime::start_temporary_connection(&bob_dir, &alice_invite).unwrap();
+        DesktopRuntime::send_temporary_message(&bob_dir, &start.connection_id, "temporary hello")
+            .await
+            .unwrap();
+
+        let alice_report = DesktopRuntime::receive(&alice_dir).await.unwrap();
+        assert_eq!(alice_report.received_count, 1);
+        assert!(alice_report.snapshot.contacts.is_empty());
+        assert_eq!(alice_report.snapshot.temporary_connections.len(), 1);
+        assert_eq!(alice_report.snapshot.temporary_messages.len(), 1);
+        assert_eq!(
+            alice_report.snapshot.temporary_messages[0].body,
+            "temporary hello"
+        );
+
+        handle.abort();
+        let _ = fs::remove_dir_all(alice_dir);
+        let _ = fs::remove_dir_all(bob_dir);
+    }
 
     #[test]
     fn extract_invite_uri_accepts_surrounding_text() {

@@ -569,10 +569,13 @@ impl QuicRelayClient {
             .map_err(|err| ClientError::Transport(err.to_string()))?;
         send.finish()
             .map_err(|err| ClientError::Transport(err.to_string()))?;
-        let response = timeout(RELAY_QUIC_COMMAND_TIMEOUT, recv.read_to_end(16 * 1024 * 1024))
-            .await
-            .map_err(|_| ClientError::Transport("relay QUIC read timed out".to_string()))?
-            .map_err(|err| ClientError::Transport(err.to_string()))?;
+        let response = timeout(
+            RELAY_QUIC_COMMAND_TIMEOUT,
+            recv.read_to_end(16 * 1024 * 1024),
+        )
+        .await
+        .map_err(|_| ClientError::Transport("relay QUIC read timed out".to_string()))?
+        .map_err(|err| ClientError::Transport(err.to_string()))?;
         let response: RelayCommandResponse = serde_json::from_slice(&response)?;
         if let RelayCommandResponse::Error { status, message } = &response {
             return Err(ClientError::Transport(format!(
@@ -585,6 +588,8 @@ impl QuicRelayClient {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayEnvelope {
+    #[serde(default)]
+    pub temporary: bool,
     pub initial: Option<InitialMessage>,
     pub wire: WireMessage,
 }
@@ -776,7 +781,11 @@ impl SecureChatDevice {
             sent_at_unix: now_unix(),
             body,
         })?;
-        let envelope = RelayEnvelope { initial, wire };
+        let envelope = RelayEnvelope {
+            temporary: false,
+            initial,
+            wire,
+        };
         let payload = serde_json::to_vec(&envelope)?;
         let frame = TransportFrame::protect(&payload, &padding_profile(payload.len()))?;
         self.relay
@@ -953,6 +962,7 @@ pub async fn run_p2p_smoke_against(
         body: "p2p authorization link".to_string(),
     })?;
     let link_envelope = RelayEnvelope {
+        temporary: false,
         initial: Some(link_initial),
         wire: link_wire,
     };
@@ -987,6 +997,7 @@ pub async fn run_p2p_smoke_against(
         body: "hello over direct p2p".to_string(),
     })?;
     let direct_envelope = RelayEnvelope {
+        temporary: false,
         initial: Some(direct_initial),
         wire: direct_wire,
     };

@@ -1,6 +1,6 @@
 [package]
 name = "secure-chat-desktop"
-version = "0.2.3"
+version = "0.2.4"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -18,3 +18,6 @@ uuid.workspace = true
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 keyring.workspace = true
+
+[dev-dependencies]
+secure-chat-relay = { path = "../secure-chat-relay" }
