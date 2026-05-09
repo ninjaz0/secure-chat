@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19045.0</TargetPlatformMinVersion>
+    <SupportedOSPlatformVersion>10.0.19045.0</SupportedOSPlatformVersion>
+    <RootNamespace>SecureChatWindows</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsPackageType>MSIX</WindowsPackageType>
+    <AppxManifest>Package.appxmanifest</AppxManifest>
+    <AppxPackageSigningEnabled>true</AppxPackageSigningEnabled>
+    <GenerateAppxPackageOnBuild>true</GenerateAppxPackageOnBuild>
+    <AppxPackageDir>$(MSBuildProjectDirectory)\bin\$(Configuration)\msix\</AppxPackageDir>
+    <AppxBundle>Never</AppxBundle>
+    <AppxPackageTestDir>$(MSBuildProjectDirectory)\bin\$(Configuration)\appx\</AppxPackageTestDir>
+    <AppxPackageSigningTimestampDigestAlgorithm>SHA256</AppxPackageSigningTimestampDigestAlgorithm>
+    <PackageCertificateKeyFile Condition="'$(PackageCertificateKeyFile)' == ''">SecureChatWindows_TemporaryKey.pfx</PackageCertificateKeyFile>
+    <PackageCertificatePassword Condition="'$(PackageCertificatePassword)' == ''"></PackageCertificatePassword>
+    <PackageVersion Condition="'$(PackageVersion)' == ''">0.2.6.0</PackageVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Manifest Include="$(ApplicationManifest)" />
+    <Content Include="Native\secure_chat_ffi.dll" Condition="Exists('Native\secure_chat_ffi.dll')" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Assets\*.png" />
+  </ItemGroup>
+</Project>

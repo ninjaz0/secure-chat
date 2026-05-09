@@ -1,6 +1,6 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
 use keyring::Entry;
 use rusqlite::{params, Connection, OptionalExtension};
 use secure_chat_client::{RelayClient, RelayEnvelope};
@@ -24,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
 
-#[cfg(not(target_os = "android"))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
 const KEYCHAIN_SERVICE: &str = "dev.local.securechat";
 const PROFILE_ID: &str = "default";
 const ENCRYPTED_TEXT_PREFIX: &str = "enc:v1:";
@@ -35,7 +35,11 @@ const MAX_TEMP_CONNECTIONS: usize = 32;
 const MAX_TEMP_MESSAGES_PER_CONNECTION: usize = 200;
 const SNAPSHOT_MESSAGES_PER_THREAD: i64 = 500;
 const CONTENT_PREFIX: &str = "securechat-content-v1:";
-const ATTACHMENT_CHUNK_BYTES: usize = 384 * 1024;
+// The relay limits ciphertext to 1 MiB and Axum also applies a request-body
+// limit before the handler sees the decoded ciphertext. A chunk is base64'd in
+// the rich-content payload, encrypted, wrapped in a transport frame, then sent
+// as JSON, so keep the raw file chunk well below those limits.
+const ATTACHMENT_CHUNK_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, Error)]
 pub enum DesktopError {
@@ -43,7 +47,7 @@ pub enum DesktopError {
     Database(#[from] rusqlite::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-    #[cfg(not(target_os = "android"))]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
     #[error("keychain error: {0}")]
     Keychain(#[from] keyring::Error),
     #[cfg(target_os = "android")]
@@ -3555,12 +3559,12 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
     fn load_secret(&self, kind: &str) -> Result<String, DesktopError> {
         Ok(self.keychain_entry(kind)?.get_password()?)
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
     fn save_secret(&self, kind: &str, value: &str) -> Result<(), DesktopError> {
         self.keychain_entry(kind)?.set_password(value)?;
         Ok(())
@@ -3604,7 +3608,7 @@ impl DesktopRuntime {
             .join(format!("{kind}.secret"))
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
     fn keychain_entry(&self, kind: &str) -> Result<Entry, keyring::Error> {
         Entry::new(
             KEYCHAIN_SERVICE,
@@ -4144,6 +4148,56 @@ mod tests {
         let deleted = DesktopRuntime::delete_contact(&bob_dir, &alice_contact_id_for_bob).unwrap();
         assert!(deleted.contacts.is_empty());
         assert!(deleted.messages.is_empty());
+
+        handle.abort();
+        let _ = fs::remove_dir_all(alice_dir);
+        let _ = fs::remove_dir_all(bob_dir);
+    }
+
+    #[tokio::test]
+    async fn large_attachment_chunks_fit_relay_http_limits() {
+        let (addr, handle) = secure_chat_relay::spawn_ephemeral().await.unwrap();
+        let relay_url = format!("http://{addr}");
+        let alice_dir = test_data_dir("alice-large-attachment");
+        let bob_dir = test_data_dir("bob-large-attachment");
+
+        DesktopRuntime::bootstrap(&alice_dir, "Alice", &relay_url)
+            .await
+            .unwrap();
+        DesktopRuntime::bootstrap(&bob_dir, "Bob", &relay_url)
+            .await
+            .unwrap();
+
+        let alice_invite = DesktopRuntime::invite(&alice_dir).unwrap().invite_uri;
+        let bob_snapshot = DesktopRuntime::add_contact(&bob_dir, "Alice", &alice_invite).unwrap();
+        let alice_contact_id_for_bob = bob_snapshot.contacts[0].id.clone();
+
+        let file_path = bob_dir.join("large-photo.jpg");
+        let bytes: Vec<u8> = (0..(600 * 1024 + 37))
+            .map(|index| (index % 251) as u8)
+            .collect();
+        fs::write(&file_path, &bytes).unwrap();
+
+        DesktopRuntime::send_attachment(
+            &bob_dir,
+            "contact",
+            &alice_contact_id_for_bob,
+            file_path.to_str().unwrap(),
+            "image",
+        )
+        .await
+        .unwrap();
+
+        let alice_report = DesktopRuntime::receive(&alice_dir).await.unwrap();
+        let attachment = alice_report
+            .snapshot
+            .messages
+            .iter()
+            .find(|message| message.content.kind == "image")
+            .and_then(|message| message.content.attachment.as_ref())
+            .expect("large image attachment should be reassembled");
+        let received_path = attachment.local_path.as_ref().unwrap();
+        assert_eq!(fs::read(received_path).unwrap(), bytes);
 
         handle.abort();
         let _ = fs::remove_dir_all(alice_dir);

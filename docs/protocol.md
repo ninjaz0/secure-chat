@@ -95,6 +95,10 @@ stays below the relay payload limit. Metadata records include attachment ID,
 kind, file name, MIME type, byte size, sha256, local path, transfer state, and
 chunk counters.
 
+The desktop runtime currently uses 128 KiB raw file chunks. This leaves room for
+base64, JSON, ratchet encryption, transport-frame padding, relay request
+signatures, and HTTP body limits before the relay's 1 MiB ciphertext cap.
+
 Image messages render from the reassembled local file. File messages expose the
 file name, size, transfer status, and local path. Sticker messages use the same
 encrypted attachment path but a compact bubble style. Importing a sticker pack is
@@ -213,7 +217,10 @@ plaintext message body and no endpoint identity private keys.
 
 The desktop runtime separates long-lived secrets from app records:
 
-- macOS Keychain stores the device identity key material and a local storage key.
+- macOS/iOS Keychain stores the device identity key material and a local
+  storage key.
+- Windows Credential Manager/DPAPI stores the device identity key material and
+  local storage key. The app data directory is `%LOCALAPPDATA%\SecureChat`.
 - SQLite stores profile metadata, contacts, encrypted Double Ratchet session
   state, encrypted message bodies, attachment metadata, local attachment paths,
   sticker packs/items, burn state, and cached relay ciphertext envelopes.

@@ -21,7 +21,7 @@ chacha20poly1305 = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
 hkdf = "0.12"
 jsonwebtoken = "9"
-keyring = { version = "3", features = ["apple-native"] }
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
 openmls = "0.8.1"
 rand_core = { version = "0.6", features = ["getrandom"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

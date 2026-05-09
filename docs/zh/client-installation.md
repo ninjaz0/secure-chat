@@ -59,6 +59,21 @@ https://github.com/ninjaz0/secure-chat/releases/latest
 
 安装完成后，建议关闭“允许安装未知应用”权限，避免其他 APK 被误装。
 
+## Windows 客户端安装
+
+适用于 Windows 10 22H2 或更新版本，优先推荐 Windows 11。
+
+1. 打开最新版 Release 页面。
+2. 下载 `SecureChatWindows-版本号.msix`，例如 `SecureChatWindows-0.2.6.msix`。
+3. 同时下载或确认发布页里的 SHA-256 校验值，检查安装包没有被替换。
+4. 双击 MSIX 安装。
+5. 如果当前版本使用本地测试证书，先把发布页提供的 `.cer` 证书导入到
+   `Current User -> Trusted People`，再安装 MSIX。
+6. 安装完成后，从开始菜单启动 `SecureChat`。
+
+Windows 端使用 Windows Credential Manager/DPAPI 保存设备身份密钥和本地存储
+密钥，SQLite、附件、表情和临时文件放在 `%LOCALAPPDATA%\SecureChat`。
+
 ## iOS 客户端安装
 
 iOS 目前不是 App Store 公开上架版本。可用方式有两种：
@@ -115,7 +130,7 @@ docs/zh/ios-client.md
 
 ## 发送更多类型的消息
 
-v0.2.5 起，macOS、iOS 和 Android 的聊天页都支持：
+v0.2.5 起，macOS、iOS 和 Android 的聊天页都支持；v0.2.6 起 Windows 也支持：
 
 - 文本和 Unicode emoji。
 - 图片消息和普通文件消息。
@@ -157,6 +172,7 @@ v0.2.5 起，macOS、iOS 和 Android 的聊天页都支持：
 
 - macOS：下载新的 DMG，把新的 `SecureChatMac.app` 拖进 `应用程序` 并替换旧版。
 - Android：下载新的 APK，直接安装覆盖旧版。
+- Windows：下载新的 MSIX，双击安装覆盖旧版。
 - iOS：通过 TestFlight 更新，或用 Xcode 重新 Run 一次。
 
 正常覆盖安装不会删除本地聊天数据。为了稳妥，更新前先退出正在运行的旧客户端。
@@ -180,6 +196,11 @@ v0.2.5 起，macOS、iOS 和 Android 的聊天页都支持：
 ### Android 安装失败
 
 确认下载的是 `.apk` 文件，并且 Android 系统允许当前浏览器或文件管理器安装未知应用。安装完成后可以关闭该权限。
+
+### Windows MSIX 安装失败
+
+如果系统提示证书不受信任，说明当前包使用测试证书。确认安装包来自项目 GitHub
+Release 后，把对应 `.cer` 导入当前用户的 `Trusted People`，再重新双击 MSIX。
 
 ### macOS 打不开
 

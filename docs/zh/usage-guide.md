@@ -10,7 +10,7 @@ chat.example.com
 
 ## 你需要准备什么
 
-- 两台客户端设备：macOS、iOS 或 Android 都可以混用
+- 两台客户端设备：macOS、iOS、Android 或 Windows 都可以混用
 - 一个可访问的 relay：
   - QUIC URL：`quic://chat.example.com:443`
   - HTTPS URL：`https://chat.example.com`
@@ -49,6 +49,15 @@ Android 客户端构建：
 
 Android 与 macOS/iOS 也通过同一个 Rust FFI/JNI 安全核心和同一个 relay 协议互通。
 
+Windows 客户端构建：
+
+```powershell
+.\script\build_windows.ps1 -Configuration Release
+```
+
+Windows 端是 WinUI 3 + Windows App SDK + C# P/Invoke，调用同一个
+`secure_chat_ffi.dll` 和同一套 relay 协议。
+
 ## 第一次创建本地身份
 
 在登录界面填写：
@@ -60,7 +69,8 @@ Android 与 macOS/iOS 也通过同一个 Rust FFI/JNI 安全核心和同一个 r
 
 客户端会在本机创建匿名账号和设备身份：
 
-- 身份私钥保存到 Apple Keychain
+- 身份私钥保存到平台安全存储：macOS/iOS 使用 Apple Keychain，Windows 使用
+  Windows Credential Manager/DPAPI，Android 使用 app-private no-backup 存储
 - 联系人、会话状态和本地消息缓存保存到 SQLite
 - 本地消息正文和 ratchet session 会加密后落盘
 
@@ -178,7 +188,7 @@ Command + Return
 ## 两个人跨公网互聊的最短路径
 
 1. 服务器部署 relay。
-2. Alice 和 Bob 都把 Relay URL 设置成 `quic://chat.example.com:443`，无论一方是 macOS、iOS 还是 Android。
+2. Alice 和 Bob 都把 Relay URL 设置成 `quic://chat.example.com:443`，无论一方是 macOS、iOS、Android 还是 Windows。
 3. Alice 复制 invite 给 Bob。
 4. Bob 导入 Alice invite。
 5. Bob 复制 invite 给 Alice。
@@ -202,10 +212,11 @@ cargo run -p secure-chat-client --bin secure-chat-smoke
 
 桌面 runtime 使用：
 
-- Keychain：设备身份私钥和本地存储密钥
+- macOS/iOS Keychain 或 Windows Credential Manager/DPAPI：设备身份私钥和本地存储密钥
 - SQLite：profile、contacts、encrypted sessions、encrypted messages、relay ciphertext cache
 
-删除 app bundle 不会自动删除 Keychain 身份。重装后如果数据目录和 Keychain scope 一致，会继续使用原身份。
+删除 app bundle 或卸载 MSIX 不一定会自动删除平台凭据。重装后如果数据目录和凭据
+scope 一致，会继续使用原身份。
 
 ## 常见问题
 
