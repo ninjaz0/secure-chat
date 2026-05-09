@@ -112,12 +112,18 @@ if [[ -z "$TOOLCHAIN_DIR" ]]; then
   exit 1
 fi
 
-TARGETS=("aarch64-linux-android" "x86_64-linux-android")
+TARGETS=("aarch64-linux-android" "armv7-linux-androideabi" "i686-linux-android" "x86_64-linux-android")
 
 abi_for_target() {
   case "$1" in
     aarch64-linux-android)
       echo "arm64-v8a"
+      ;;
+    armv7-linux-androideabi)
+      echo "armeabi-v7a"
+      ;;
+    i686-linux-android)
+      echo "x86"
       ;;
     x86_64-linux-android)
       echo "x86_64"
@@ -134,6 +140,12 @@ abi_for_target() {
 export AR_aarch64_linux_android="$TOOLCHAIN_DIR/bin/llvm-ar"
 export CC_aarch64_linux_android="$TOOLCHAIN_DIR/bin/aarch64-linux-android${ANDROID_API}-clang"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN_DIR/bin/aarch64-linux-android${ANDROID_API}-clang"
+export AR_armv7_linux_androideabi="$TOOLCHAIN_DIR/bin/llvm-ar"
+export CC_armv7_linux_androideabi="$TOOLCHAIN_DIR/bin/armv7a-linux-androideabi${ANDROID_API}-clang"
+export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$TOOLCHAIN_DIR/bin/armv7a-linux-androideabi${ANDROID_API}-clang"
+export AR_i686_linux_android="$TOOLCHAIN_DIR/bin/llvm-ar"
+export CC_i686_linux_android="$TOOLCHAIN_DIR/bin/i686-linux-android${ANDROID_API}-clang"
+export CARGO_TARGET_I686_LINUX_ANDROID_LINKER="$TOOLCHAIN_DIR/bin/i686-linux-android${ANDROID_API}-clang"
 export AR_x86_64_linux_android="$TOOLCHAIN_DIR/bin/llvm-ar"
 export CC_x86_64_linux_android="$TOOLCHAIN_DIR/bin/x86_64-linux-android${ANDROID_API}-clang"
 export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$TOOLCHAIN_DIR/bin/x86_64-linux-android${ANDROID_API}-clang"

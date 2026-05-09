@@ -69,11 +69,11 @@ class SecureChatViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun bootstrap(displayName: String, relayUrl: String) {
-        runCore { applySnapshot(callCore { client.bootstrap(displayName.trim(), relayUrl.trim()) }) }
+        runCore { applySnapshot(callCore { client.bootstrap(displayName.trim(), SecureChatInput.normalizeRelayUrl(relayUrl)) }) }
     }
 
     fun updateRelay(relayUrl: String) {
-        runCore { applySnapshot(callCore { client.updateRelay(relayUrl.trim()) }) }
+        runCore { applySnapshot(callCore { client.updateRelay(SecureChatInput.normalizeRelayUrl(relayUrl)) }) }
     }
 
     fun selectContact(id: String) {

@@ -26,7 +26,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Divider
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -99,7 +99,7 @@ fun SecureChatApp(viewModel: SecureChatViewModel) {
 @Composable
 private fun LoginScreen(viewModel: SecureChatViewModel, state: SecureChatUiState) {
     var displayName by rememberSaveable { mutableStateOf("") }
-    var relayUrl by rememberSaveable { mutableStateOf("https://") }
+    var relayUrl by rememberSaveable { mutableStateOf("") }
 
     Column(
         modifier = Modifier
@@ -123,6 +123,7 @@ private fun LoginScreen(viewModel: SecureChatViewModel, state: SecureChatUiState
             value = relayUrl,
             onValueChange = { relayUrl = it },
             label = { Text("Relay URL") },
+            placeholder = { Text("https://chat.example.com or quic://chat.example.com:443") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -459,7 +460,7 @@ private fun <T> ChatContainer(
                     OutlinedButton(onClick = onEndTemporary) { Text("End") }
                 }
             }
-            Divider()
+            HorizontalDivider()
             messages.forEach { message ->
                 when (message) {
                     is AppChatMessage -> MessageBubble(
