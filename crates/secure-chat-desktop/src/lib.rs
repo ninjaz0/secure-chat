@@ -49,7 +49,7 @@ pub enum DesktopError {
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
     #[error("keychain error: {0}")]
     Keychain(#[from] keyring::Error),
-    #[cfg(target_os = "android")]
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
     #[error("secret store error: {0}")]
     SecretStore(String),
     #[error("protocol error: {0}")]
@@ -2985,14 +2985,14 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    #[cfg(target_os = "android")]
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
     fn load_secret(&self, kind: &str) -> Result<String, DesktopError> {
         fs::read_to_string(self.secret_store_path(kind))
             .map(|value| value.trim_end_matches('\n').to_string())
             .map_err(|err| DesktopError::SecretStore(err.to_string()))
     }
 
-    #[cfg(target_os = "android")]
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
     fn save_secret(&self, kind: &str, value: &str) -> Result<(), DesktopError> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
@@ -3015,7 +3015,7 @@ impl DesktopRuntime {
         Ok(())
     }
 
-    #[cfg(target_os = "android")]
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
     fn secret_store_path(&self, kind: &str) -> PathBuf {
         self.data_dir
             .join("secrets")

@@ -34,7 +34,12 @@ jobs:
       - uses: android-actions/setup-android@v3
       - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
       - run: ./script/build_android.sh release
-      - run: ./dist/gradle/gradle-8.10.2/bin/gradle -p apps/android/SecureChatAndroid lintRelease testReleaseUnitTest
+      - run: |
+          GRADLE_BIN="$(command -v gradle || true)"
+          if [ -z "$GRADLE_BIN" ]; then
+            GRADLE_BIN="./dist/gradle/gradle-8.10.2/bin/gradle"
+          fi
+          "$GRADLE_BIN" -p apps/android/SecureChatAndroid lintRelease testReleaseUnitTest
 
   macos-app:
     runs-on: macos-latest
