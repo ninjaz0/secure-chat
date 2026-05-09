@@ -36,8 +36,10 @@ final class SecureChatStore: ObservableObject {
     }
     @Published private(set) var errorMessage: String?
     @Published private(set) var isLoading = false
+    @Published private(set) var isReceiving = false
     private let defaults: UserDefaults
     private var autoReceiveTask: Task<Void, Never>?
+    private var receiveInFlight = false
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -85,154 +87,130 @@ final class SecureChatStore: ObservableObject {
     }
 
     func loadDemo() async {
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            demo = try SecureChatCoreClient.loadDemoState()
+        await runLoading {
+            demo = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.loadDemoState()
+            }
             errorMessage = demo?.ok == true ? nil : demo?.error
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 
     func runSelfTest() async {
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            selfTest = try SecureChatCoreClient.runSelfTest()
+        await runLoading {
+            selfTest = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.runSelfTest()
+            }
             errorMessage = selfTest?.ok == true ? nil : "Protocol self-test failed."
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 
     func runRelaySmoke() async {
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            relaySmoke = try SecureChatCoreClient.runRelaySmoke()
+        await runLoading {
+            relaySmoke = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.runRelaySmoke()
+            }
             errorMessage = relaySmoke?.ok == true ? nil : "Relay smoke failed."
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 
     func runP2PProbe() async {
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            p2pProbe = try SecureChatCoreClient.runP2PProbe()
+        await runLoading {
+            p2pProbe = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.runP2PProbe()
+            }
             errorMessage = p2pProbe?.ok == true ? nil : "P2P NAT probe failed."
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 
     func loadAppSnapshot() async {
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            apply(snapshot: try SecureChatCoreClient.appSnapshot())
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
+        await runLoading {
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.appSnapshot()
+            }
+            apply(snapshot: snapshot)
         }
     }
 
     func bootstrap(displayName: String, relayURL: String) async {
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            apply(snapshot: try SecureChatCoreClient.bootstrap(displayName: displayName, relayURL: relayURL))
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
+        await runLoading {
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.bootstrap(displayName: displayName, relayURL: relayURL)
+            }
+            apply(snapshot: snapshot)
         }
     }
 
     func updateRelay(_ relayURL: String) async {
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            apply(snapshot: try SecureChatCoreClient.updateRelay(relayURL))
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
+        await runLoading {
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.updateRelay(relayURL)
+            }
+            apply(snapshot: snapshot)
         }
     }
 
     func previewInvite(_ inviteText: String) async throws -> InvitePreview {
-        try SecureChatCoreClient.previewInvite(inviteText)
+        try await SecureChatCoreClient.runInBackground {
+            try SecureChatCoreClient.previewInvite(inviteText)
+        }
     }
 
     @discardableResult
     func addContact(displayName: String, inviteURI: String) async -> Bool {
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            apply(snapshot: try SecureChatCoreClient.addContact(displayName: displayName, inviteURI: inviteURI))
-            errorMessage = nil
-            return true
-        } catch {
-            errorMessage = error.localizedDescription
-            return false
+        await runLoading {
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.addContact(displayName: displayName, inviteURI: inviteURI)
+            }
+            apply(snapshot: snapshot)
         }
     }
 
     func sendMessage(_ body: String) async {
         guard let selectedContactID else { return }
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            apply(snapshot: try SecureChatCoreClient.sendMessage(contactID: selectedContactID, body: body))
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
+        await runLoading {
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.sendMessage(contactID: selectedContactID, body: body)
+            }
+            apply(snapshot: snapshot)
         }
     }
 
     func createGroup(displayName: String) async {
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            let snapshot = try SecureChatCoreClient.createGroup(displayName: displayName)
+        await runLoading {
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.createGroup(displayName: displayName)
+            }
             apply(snapshot: snapshot)
             selectedGroupID = snapshot.groups.first { $0.displayName == displayName }?.id ?? snapshot.groups.first?.id
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 
     func addSelectedContactToSelectedGroup() async {
         guard let selectedGroupID, let selectedContactID else { return }
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            apply(snapshot: try SecureChatCoreClient.addGroupMember(groupID: selectedGroupID, contactID: selectedContactID))
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
+        await runLoading {
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.addGroupMember(groupID: selectedGroupID, contactID: selectedContactID)
+            }
+            apply(snapshot: snapshot)
         }
     }
 
     func sendGroupMessage(_ body: String) async {
         guard let selectedGroupID else { return }
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            apply(snapshot: try SecureChatCoreClient.sendGroupMessage(groupID: selectedGroupID, body: body))
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
+        await runLoading {
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.sendGroupMessage(groupID: selectedGroupID, body: body)
+            }
+            apply(snapshot: snapshot)
         }
     }
 
     func registerPushToken(_ token: String, platform: String) async {
-        isLoading = true
-        defer { isLoading = false }
         do {
-            apply(snapshot: try SecureChatCoreClient.registerPushToken(token, platform: platform))
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.registerPushToken(token, platform: platform)
+            }
+            apply(snapshot: snapshot)
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -240,10 +218,17 @@ final class SecureChatStore: ObservableObject {
     }
 
     func receiveMessages() async {
-        isLoading = true
-        defer { isLoading = false }
+        guard !receiveInFlight else { return }
+        receiveInFlight = true
+        isReceiving = true
+        defer {
+            isReceiving = false
+            receiveInFlight = false
+        }
         do {
-            let report = try SecureChatCoreClient.receiveMessages()
+            let report = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.receiveMessages()
+            }
             apply(snapshot: report.snapshot)
             if notifyOnNewMessages {
                 NotificationService.notifyNewMessages(count: report.receivedCount, soundEnabled: playNotificationSound)
@@ -265,7 +250,7 @@ final class SecureChatStore: ObservableObject {
                 try? await Task.sleep(nanoseconds: UInt64(interval) * 1_000_000_000)
                 guard !Task.isCancelled else { return }
                 let shouldReceive = await MainActor.run {
-                    self.autoReceiveEnabled && self.isReady && !self.isLoading
+                    self.autoReceiveEnabled && self.isReady && !self.isLoading && !self.isReceiving
                 }
                 if shouldReceive {
                     await self.receiveMessages()
@@ -280,58 +265,60 @@ final class SecureChatStore: ObservableObject {
     }
 
     func copyOwnInvite() {
-        if let invite = try? SecureChatCoreClient.ownInvite() {
-            Clipboard.copy(invite.inviteUri)
-        } else if let invite = appSnapshot?.profile?.inviteUri {
-            Clipboard.copy(invite)
+        Task { [weak self] in
+            do {
+                let invite = try await SecureChatCoreClient.runInBackground {
+                    try SecureChatCoreClient.ownInvite()
+                }
+                Clipboard.copy(invite.inviteUri)
+            } catch {
+                if let invite = self?.appSnapshot?.profile?.inviteUri {
+                    Clipboard.copy(invite)
+                }
+            }
         }
     }
 
     func copyTemporaryInvite() {
-        if let invite = try? SecureChatCoreClient.temporaryInvite() {
-            Clipboard.copy(invite.inviteUri)
+        Task {
+            if let invite = try? await SecureChatCoreClient.runInBackground({
+                try SecureChatCoreClient.temporaryInvite()
+            }) {
+                Clipboard.copy(invite.inviteUri)
+            }
         }
     }
 
     @discardableResult
     func startTemporaryConnection(inviteURI: String) async -> Bool {
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            let response = try SecureChatCoreClient.startTemporaryConnection(inviteURI: inviteURI)
+        await runLoading {
+            let response = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.startTemporaryConnection(inviteURI: inviteURI)
+            }
             apply(snapshot: response.snapshot)
             selectedTemporaryConnectionID = response.connectionId
-            errorMessage = nil
-            return true
-        } catch {
-            errorMessage = error.localizedDescription
-            return false
         }
     }
 
     func sendTemporaryMessage(_ body: String) async {
         guard let selectedTemporaryConnectionID else { return }
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            apply(snapshot: try SecureChatCoreClient.sendTemporaryMessage(connectionID: selectedTemporaryConnectionID, body: body))
+        await runLoading {
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.sendTemporaryMessage(connectionID: selectedTemporaryConnectionID, body: body)
+            }
+            apply(snapshot: snapshot)
             self.selectedTemporaryConnectionID = selectedTemporaryConnectionID
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 
     func endTemporaryConnection() async {
         guard let selectedTemporaryConnectionID else { return }
-        isLoading = true
-        defer { isLoading = false }
-        do {
-            apply(snapshot: try SecureChatCoreClient.endTemporaryConnection(connectionID: selectedTemporaryConnectionID))
+        await runLoading {
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.endTemporaryConnection(connectionID: selectedTemporaryConnectionID)
+            }
+            apply(snapshot: snapshot)
             self.selectedTemporaryConnectionID = nil
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 
@@ -357,6 +344,23 @@ final class SecureChatStore: ObservableObject {
         if let selectedTemporaryConnectionID,
            !(snapshot.temporaryConnections.contains { $0.id == selectedTemporaryConnectionID }) {
             self.selectedTemporaryConnectionID = nil
+        }
+    }
+
+    @discardableResult
+    private func runLoading(_ work: () async throws -> Void) async -> Bool {
+        isLoading = true
+        defer { isLoading = false }
+        let previousError = errorMessage
+        do {
+            try await work()
+            if errorMessage == previousError {
+                errorMessage = nil
+            }
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
         }
     }
 

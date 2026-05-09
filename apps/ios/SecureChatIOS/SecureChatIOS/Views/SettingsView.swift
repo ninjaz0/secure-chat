@@ -33,7 +33,7 @@ struct SettingsView: View {
                     } label: {
                         Label("Receive Now", systemImage: "tray.and.arrow.down")
                     }
-                    .disabled(store.isLoading)
+                    .disabled(store.isLoading || store.isReceiving)
                 }
 
                 Section("Notifications") {

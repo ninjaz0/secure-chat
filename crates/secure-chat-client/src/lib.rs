@@ -23,6 +23,10 @@ use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::time::{timeout, Duration};
 
+const RELAY_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const RELAY_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+const RELAY_QUIC_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("http request failed: {0}")]
@@ -297,7 +301,12 @@ impl RelayHttpClient {
         let insecure_error = insecure_http_error(&base_url);
         Self {
             base_url,
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(RELAY_HTTP_CONNECT_TIMEOUT)
+                .timeout(RELAY_HTTP_REQUEST_TIMEOUT)
+                .pool_idle_timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             insecure_error,
         }
     }
@@ -542,24 +551,27 @@ impl QuicRelayClient {
         })?)
         .map_err(|err| ClientError::Transport(err.to_string()))?;
         endpoint.set_default_client_config(quic_client_config()?);
-        let connection = endpoint
+        let connecting = endpoint
             .connect(addr, &server_name)
-            .map_err(|err| ClientError::Transport(err.to_string()))?
-            .await
             .map_err(|err| ClientError::Transport(err.to_string()))?;
-        let (mut send, mut recv) = connection
-            .open_bi()
+        let connection = timeout(RELAY_QUIC_COMMAND_TIMEOUT, connecting)
             .await
+            .map_err(|_| ClientError::Transport("relay QUIC connect timed out".to_string()))?
+            .map_err(|err| ClientError::Transport(err.to_string()))?;
+        let (mut send, mut recv) = timeout(RELAY_QUIC_COMMAND_TIMEOUT, connection.open_bi())
+            .await
+            .map_err(|_| ClientError::Transport("relay QUIC stream timed out".to_string()))?
             .map_err(|err| ClientError::Transport(err.to_string()))?;
         let request = serde_json::to_vec(&command)?;
-        send.write_all(&request)
+        timeout(RELAY_QUIC_COMMAND_TIMEOUT, send.write_all(&request))
             .await
+            .map_err(|_| ClientError::Transport("relay QUIC write timed out".to_string()))?
             .map_err(|err| ClientError::Transport(err.to_string()))?;
         send.finish()
             .map_err(|err| ClientError::Transport(err.to_string()))?;
-        let response = recv
-            .read_to_end(16 * 1024 * 1024)
+        let response = timeout(RELAY_QUIC_COMMAND_TIMEOUT, recv.read_to_end(16 * 1024 * 1024))
             .await
+            .map_err(|_| ClientError::Transport("relay QUIC read timed out".to_string()))?
             .map_err(|err| ClientError::Transport(err.to_string()))?;
         let response: RelayCommandResponse = serde_json::from_slice(&response)?;
         if let RelayCommandResponse::Error { status, message } = &response {

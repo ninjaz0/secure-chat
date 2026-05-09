@@ -10,6 +10,18 @@ enum SecureChatCoreClient {
         return url.path
     }
 
+    static func runInBackground<T>(_ work: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    continuation.resume(returning: try work())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     static func loadDemoState() throws -> DemoState {
         try decodeCString(secure_chat_demo_state_json(), as: DemoState.self)
     }

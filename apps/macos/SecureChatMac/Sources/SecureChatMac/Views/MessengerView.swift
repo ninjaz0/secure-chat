@@ -49,7 +49,7 @@ struct MessengerView: View {
                     Label("Receive", systemImage: "tray.and.arrow.down")
                 }
                 .help("Pull encrypted messages from relay")
-                .disabled(store.isLoading)
+                .disabled(store.isLoading || store.isReceiving)
 
                 SettingsLink {
                     Label("Settings", systemImage: "gearshape")

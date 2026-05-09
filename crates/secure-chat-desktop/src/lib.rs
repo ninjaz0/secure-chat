@@ -31,6 +31,7 @@ const TEMP_CONNECTION_TTL_SECS: u64 = 24 * 60 * 60;
 const TEMP_MESSAGE_TTL_SECS: u64 = 10 * 60;
 const MAX_TEMP_CONNECTIONS: usize = 32;
 const MAX_TEMP_MESSAGES_PER_CONNECTION: usize = 200;
+const SNAPSHOT_MESSAGES_PER_THREAD: i64 = 500;
 
 #[derive(Debug, Error)]
 pub enum DesktopError {
@@ -1065,6 +1066,12 @@ impl DesktopRuntime {
                 sent_at_unix INTEGER NOT NULL,
                 received_at_unix INTEGER
             );
+            CREATE INDEX IF NOT EXISTS idx_contacts_updated ON contacts(updated_at_unix DESC);
+            CREATE INDEX IF NOT EXISTS idx_messages_contact_sent ON messages(contact_id, sent_at_unix DESC);
+            CREATE INDEX IF NOT EXISTS idx_groups_updated ON groups(updated_at_unix DESC);
+            CREATE INDEX IF NOT EXISTS idx_group_messages_group_sent ON group_messages(group_id, sent_at_unix DESC);
+            CREATE INDEX IF NOT EXISTS idx_temporary_connections_updated ON temporary_connections(updated_at_unix DESC);
+            CREATE INDEX IF NOT EXISTS idx_temporary_messages_connection_sent ON temporary_messages(connection_id, sent_at_unix DESC);
             "#,
         )?;
         self.ensure_sessions_schema()?;
@@ -1527,10 +1534,16 @@ impl DesktopRuntime {
     ) -> Result<Vec<GroupMessageView>, DesktopError> {
         let mut statement = self.conn.prepare(
             "SELECT id, group_id, sender_display_name, direction, body_nonce, body_ciphertext, status, sent_at_unix, received_at_unix
-             FROM group_messages ORDER BY sent_at_unix ASC",
+             FROM (
+                 SELECT id, group_id, sender_display_name, direction, body_nonce, body_ciphertext, status, sent_at_unix, received_at_unix,
+                        ROW_NUMBER() OVER (PARTITION BY group_id ORDER BY sent_at_unix DESC, id DESC) AS row_num
+                 FROM group_messages
+             )
+             WHERE row_num <= ?1
+             ORDER BY group_id ASC, sent_at_unix ASC, id ASC",
         )?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map(params![SNAPSHOT_MESSAGES_PER_THREAD], |row| {
                 let nonce: Vec<u8> = row.get(4)?;
                 let ciphertext: Vec<u8> = row.get(5)?;
                 Ok((
@@ -1618,10 +1631,16 @@ impl DesktopRuntime {
     fn message_views(&self, storage_key: &Key32) -> Result<Vec<ChatMessageView>, DesktopError> {
         let mut statement = self.conn.prepare(
             "SELECT id, contact_id, direction, body_nonce, body_ciphertext, status, sent_at_unix, received_at_unix
-             FROM messages ORDER BY sent_at_unix ASC",
+             FROM (
+                 SELECT id, contact_id, direction, body_nonce, body_ciphertext, status, sent_at_unix, received_at_unix,
+                        ROW_NUMBER() OVER (PARTITION BY contact_id ORDER BY sent_at_unix DESC, id DESC) AS row_num
+                 FROM messages
+             )
+             WHERE row_num <= ?1
+             ORDER BY contact_id ASC, sent_at_unix ASC, id ASC",
         )?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map(params![SNAPSHOT_MESSAGES_PER_THREAD], |row| {
                 let nonce: Vec<u8> = row.get(3)?;
                 let ciphertext: Vec<u8> = row.get(4)?;
                 Ok((
@@ -1659,11 +1678,17 @@ impl DesktopRuntime {
     ) -> Result<Vec<TemporaryMessageView>, DesktopError> {
         let mut statement = self.conn.prepare(
             "SELECT id, connection_id, direction, body_nonce, body_ciphertext, status, sent_at_unix, received_at_unix
-             FROM temporary_messages ORDER BY sent_at_unix ASC",
+             FROM (
+                 SELECT id, connection_id, direction, body_nonce, body_ciphertext, status, sent_at_unix, received_at_unix,
+                        ROW_NUMBER() OVER (PARTITION BY connection_id ORDER BY sent_at_unix DESC, id DESC) AS row_num
+                 FROM temporary_messages
+             )
+             WHERE row_num <= ?1
+             ORDER BY connection_id ASC, sent_at_unix ASC, id ASC",
         )?;
         let rows =
             statement
-                .query_map([], |row| {
+                .query_map(params![SNAPSHOT_MESSAGES_PER_THREAD], |row| {
                     let nonce: Vec<u8> = row.get(3)?;
                     let ciphertext: Vec<u8> = row.get(4)?;
                     Ok((
