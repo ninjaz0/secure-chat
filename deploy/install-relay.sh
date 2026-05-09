@@ -110,6 +110,11 @@ section() {
   printf '\n== %s ==\n' "$1"
 }
 
+is_tcp_port() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535))
+}
+
 is_ipv4() {
   local ip="$1"
   [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
@@ -167,6 +172,49 @@ detect_public_ip() {
     fi
   done
   return 1
+}
+
+detect_ssh_ports() {
+  local detected=()
+  local client_ip client_port server_ip server_port rest
+  if [[ -n "${SSH_CONNECTION:-}" ]]; then
+    read -r client_ip client_port server_ip server_port rest <<<"$SSH_CONNECTION"
+    if is_tcp_port "$server_port"; then
+      detected+=("$server_port")
+    fi
+  fi
+
+  local sshd_cmd=""
+  if command -v sshd >/dev/null 2>&1; then
+    sshd_cmd="$(command -v sshd)"
+  elif [[ -x /usr/sbin/sshd ]]; then
+    sshd_cmd="/usr/sbin/sshd"
+  fi
+  if [[ -n "$sshd_cmd" ]]; then
+    local port
+    while read -r port; do
+      if is_tcp_port "$port"; then
+        detected+=("$port")
+      fi
+    done < <(need_sudo "$sshd_cmd" -T 2>/dev/null | awk '$1 == "port" {print $2}' || true)
+  fi
+
+  local config
+  for config in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
+    [[ -r "$config" ]] || continue
+    local port
+    while read -r port; do
+      if is_tcp_port "$port"; then
+        detected+=("$port")
+      fi
+    done < <(awk 'tolower($1) == "port" && $2 ~ /^[0-9]+$/ {print $2}' "$config")
+  done
+
+  if [[ "${#detected[@]}" -eq 0 ]]; then
+    detected+=(22)
+  fi
+
+  printf '%s\n' "${detected[@]}" | awk '!seen[$0]++'
 }
 
 prepare_endpoint_identity() {
@@ -461,6 +509,12 @@ configure_firewall() {
   fi
 
   section "Configuring UFW"
+  local ssh_port
+  while read -r ssh_port; do
+    [[ -n "$ssh_port" ]] || continue
+    printf 'Allowing SSH on tcp/%s before enabling UFW.\n' "$ssh_port"
+    need_sudo ufw allow "$ssh_port/tcp"
+  done < <(detect_ssh_ports)
   need_sudo ufw allow 443/tcp
   need_sudo ufw allow 443/udp
   need_sudo ufw allow 3478/udp

@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_NAME="SecureChatMac"
 BUNDLE_ID="dev.local.securechat.mac"
-VERSION="${SECURE_CHAT_VERSION:-0.2.0}"
+VERSION="${SECURE_CHAT_VERSION:-0.2.1}"
 MIN_SYSTEM_VERSION="14.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -67,7 +67,7 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundleShortVersionString</key>
   <string>$VERSION</string>
   <key>CFBundleVersion</key>
-  <string>2</string>
+  <string>3</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSPrincipalClass</key>

@@ -14,6 +14,7 @@ relay operations are authenticated with per-device Ed25519 request signatures.
 - Ubuntu 22.04 or 24.04 LTS
 - one public IPv4 address. A DNS name such as `chat.example.com` is optional
 - open ports:
+  - your SSH port, usually `22/tcp`, so you do not lock yourself out when UFW is enabled
   - `80/tcp` for Let's Encrypt certificate issuance and renewal
   - `443/tcp` for HTTPS relay traffic
   - `443/udp` for QUIC relay traffic
@@ -145,6 +146,7 @@ sudo systemctl enable --now secure-chat-relay
 Open production traffic:
 
 ```bash
+sudo ufw allow 22/tcp  # replace 22 if your SSH daemon uses a custom port
 sudo ufw allow 443/tcp
 sudo ufw allow 443/udp
 sudo ufw allow 3478/udp
