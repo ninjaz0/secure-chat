@@ -32,7 +32,7 @@ https://github.com/ninjaz0/secure-chat/releases/latest
 适用于 Mac 用户。
 
 1. 打开最新版 Release 页面。
-2. 下载 `SecureChatMac-版本号.dmg`，例如 `SecureChatMac-0.2.5.dmg`。
+2. 下载 `SecureChatMac-版本号.dmg`，例如 `SecureChatMac-0.2.6.dmg`。
 3. 双击打开 DMG。
 4. 把 `SecureChatMac.app` 拖到 `Applications` / `应用程序` 文件夹。
 5. 打开 `应用程序`，启动 `SecureChatMac`。
@@ -51,7 +51,7 @@ https://github.com/ninjaz0/secure-chat/releases/latest
 适用于 Android 手机或平板。
 
 1. 打开最新版 Release 页面。
-2. 下载 `SecureChatAndroid-版本号.apk`，例如 `SecureChatAndroid-0.2.5.apk`。
+2. 下载 `SecureChatAndroid-版本号.apk`，例如 `SecureChatAndroid-0.2.6.apk`。
 3. 在手机上打开下载完成的 APK。
 4. 如果系统提示“禁止安装未知应用”，进入提示页，允许当前浏览器或文件管理器安装未知应用。
 5. 回到安装界面，点击 `安装`。
@@ -64,7 +64,10 @@ https://github.com/ninjaz0/secure-chat/releases/latest
 适用于 Windows 10 22H2 或更新版本，优先推荐 Windows 11。
 
 1. 打开最新版 Release 页面。
-2. 下载 `SecureChatWindows-版本号.msix`，例如 `SecureChatWindows-0.2.6.msix`。
+2. 如果该 Release 提供 Windows 包，下载 `SecureChatWindows-版本号.msix`，例如
+   `SecureChatWindows-0.2.6.msix`。如果页面没有 Windows 包，说明该版本还没有在
+   Windows 构建机上补发 MSIX，请先使用 macOS/Android/iOS 客户端或按
+   `docs/zh/windows-client.md` 在 Windows 本机编译。
 3. 同时下载或确认发布页里的 SHA-256 校验值，检查安装包没有被替换。
 4. 双击 MSIX 安装。
 5. 如果当前版本使用本地测试证书，先把发布页提供的 `.cer` 证书导入到

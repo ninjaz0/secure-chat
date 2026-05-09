@@ -224,6 +224,7 @@ pub struct DrainReceiptsResponse {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum RelayCommand {
     Health,
     RegisterDevice(RegisterRequest),

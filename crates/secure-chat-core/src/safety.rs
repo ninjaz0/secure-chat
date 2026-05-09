@@ -14,7 +14,7 @@ pub fn safety_number(
     local_devices: &[PublicDeviceIdentity],
     remote_devices: &[PublicDeviceIdentity],
 ) -> SafetyFingerprint {
-    let mut groups = vec![
+    let mut groups = [
         device_group_digest(local_devices),
         device_group_digest(remote_devices),
     ];

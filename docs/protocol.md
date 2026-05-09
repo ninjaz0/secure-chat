@@ -70,7 +70,7 @@ associated data.
 
 ## Versioned Content Payloads
 
-SecureChat v0.2.5 keeps the ratchet wire format stable and extends the plaintext
+SecureChat v0.2.6 keeps the ratchet wire format stable and extends the plaintext
 JSON carried inside the encrypted body. New messages use a versioned content
 payload with these logical kinds:
 

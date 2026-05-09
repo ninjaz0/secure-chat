@@ -82,7 +82,7 @@ iOS 工程依赖 `dist/SecureChatFFI.xcframework`，该文件由脚本从
 ./script/package_macos.sh
 ```
 
-产物会写到 `dist/SecureChatMac-0.2.5.dmg`。默认使用 ad-hoc 签名，适合本地
+产物会写到 `dist/SecureChatMac-0.2.6.dmg`。默认使用 ad-hoc 签名，适合本地
 测试。正式发布时需要设置 Developer ID 身份并启用严格闸门：
 
 ```bash
@@ -100,7 +100,7 @@ SECURE_CHAT_RELEASE_STRICT=1 \
 ./script/build_android.sh release
 ```
 
-发布自动化会把最终可安装 APK 复制为 `dist/SecureChatAndroid-0.2.5.apk`，并和
+发布自动化会把最终可安装 APK 复制为 `dist/SecureChatAndroid-0.2.6.apk`，并和
 macOS DMG 一起生成 SHA-256 校验文件。
 
 如需生成正式签名 APK，设置以下环境变量：
@@ -241,8 +241,9 @@ relay 安装和 `chatrelay update` 都使用 `cargo --locked` 构建，并写入
 - 中文 iOS 构建与互联教程：[docs/zh/ios-client.md](docs/zh/ios-client.md)
 - 中文 Windows 客户端说明：[docs/zh/windows-client.md](docs/zh/windows-client.md)
 - 生产环境变量示例：[deploy/relay.env.example](deploy/relay.env.example)
+- v0.2.6 发布说明：[docs/releases/v0.2.6.md](docs/releases/v0.2.6.md)
+- v0.2.6 Windows 客户端说明：[docs/releases/v0.2.6-windows.md](docs/releases/v0.2.6-windows.md)
 - v0.2.5 发布说明：[docs/releases/v0.2.5.md](docs/releases/v0.2.5.md)
-- v0.2.6 Windows 发布说明：[docs/releases/v0.2.6-windows.md](docs/releases/v0.2.6-windows.md)
 - 安全审计报告：[docs/zh/security-audit-2026-05-09.md](docs/zh/security-audit-2026-05-09.md)
 
 ## 聊天能力

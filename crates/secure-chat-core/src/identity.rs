@@ -77,8 +77,8 @@ impl DeviceKeyMaterial {
         let mut rng = OsRng;
         let account_signing = SigningKey::generate(&mut rng);
         let device_signing = SigningKey::generate(&mut rng);
-        let identity_secret = StaticSecret::random_from_rng(&mut rng);
-        let signed_pre_key_secret = StaticSecret::random_from_rng(&mut rng);
+        let identity_secret = StaticSecret::random_from_rng(rng);
+        let signed_pre_key_secret = StaticSecret::random_from_rng(rng);
         let signed_pre_key_public = X25519PublicKey::from(&signed_pre_key_secret).to_bytes();
         let device_id = Uuid::new_v4();
         let account_id = Uuid::new_v4();
@@ -106,7 +106,7 @@ impl DeviceKeyMaterial {
         let account_device_signature = sign_bytes(&device_signing, &identity_payload);
         let one_time_pre_keys = (0..one_time_pre_key_count)
             .map(|idx| {
-                let secret = StaticSecret::random_from_rng(&mut rng);
+                let secret = StaticSecret::random_from_rng(rng);
                 OneTimePreKeyMaterial {
                     id: idx as PreKeyId + 1,
                     public_key: X25519PublicKey::from(&secret).to_bytes(),

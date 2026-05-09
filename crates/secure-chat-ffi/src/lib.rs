@@ -653,7 +653,11 @@ pub extern "C" fn secure_chat_app_p2p_probe_json(data_dir: *const c_char) -> *mu
 }
 
 #[no_mangle]
-pub extern "C" fn secure_chat_free_string(ptr: *mut c_char) {
+/// # Safety
+///
+/// `ptr` must be a non-null pointer previously returned by this library from a
+/// `CString::into_raw` allocation, and it must be freed exactly once.
+pub unsafe extern "C" fn secure_chat_free_string(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
     }

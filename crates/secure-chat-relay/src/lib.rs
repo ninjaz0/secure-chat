@@ -517,10 +517,12 @@ async fn register_device_inner(
         verify_relay_auth(
             state.db_path(),
             &mut inner,
-            account_id,
-            device_id,
-            &request.bundle.identity.device_signing_public,
-            "register_device",
+            RelayAuthScope {
+                account_id,
+                device_id,
+                device_signing_public: &request.bundle.identity.device_signing_public,
+                action: "register_device",
+            },
             &signed_request,
             request.auth.as_ref(),
         )?;
@@ -592,10 +594,12 @@ async fn register_apns_token_inner(
     verify_relay_auth(
         state.db_path(),
         &mut inner,
-        request.account_id,
-        request.device_id,
-        &device_public,
-        "register_apns_token",
+        RelayAuthScope {
+            account_id: request.account_id,
+            device_id: request.device_id,
+            device_signing_public: &device_public,
+            action: "register_apns_token",
+        },
         &signed_request,
         request.auth.as_ref(),
     )?;
@@ -633,10 +637,12 @@ async fn delete_apns_token_inner(
     verify_relay_auth(
         state.db_path(),
         &mut inner,
-        request.account_id,
-        request.device_id,
-        &device_public,
-        "delete_apns_token",
+        RelayAuthScope {
+            account_id: request.account_id,
+            device_id: request.device_id,
+            device_signing_public: &device_public,
+            action: "delete_apns_token",
+        },
         &signed_request,
         request.auth.as_ref(),
     )?;
@@ -684,10 +690,12 @@ async fn publish_mls_key_package_inner(
     verify_relay_auth(
         state.db_path(),
         &mut inner,
-        request.account_id,
-        request.device_id,
-        &device_public,
-        "publish_mls_key_package",
+        RelayAuthScope {
+            account_id: request.account_id,
+            device_id: request.device_id,
+            device_signing_public: &device_public,
+            action: "publish_mls_key_package",
+        },
         &signed_request,
         request.auth.as_ref(),
     )?;
@@ -730,10 +738,12 @@ async fn claim_mls_key_package_inner(
     verify_relay_auth(
         state.db_path(),
         &mut inner,
-        request.requester_account_id,
-        request.requester_device_id,
-        &device_public,
-        "claim_mls_key_package",
+        RelayAuthScope {
+            account_id: request.requester_account_id,
+            device_id: request.requester_device_id,
+            device_signing_public: &device_public,
+            action: "claim_mls_key_package",
+        },
         &signed_request,
         request.auth.as_ref(),
     )?;
@@ -788,10 +798,12 @@ async fn publish_p2p_candidates_inner(
     verify_relay_auth(
         state.db_path(),
         &mut inner,
-        request.account_id,
-        request.device_id,
-        &device_public,
-        "publish_p2p_candidates",
+        RelayAuthScope {
+            account_id: request.account_id,
+            device_id: request.device_id,
+            device_signing_public: &device_public,
+            action: "publish_p2p_candidates",
+        },
         &signed_request,
         request.auth.as_ref(),
     )?;
@@ -823,10 +835,12 @@ async fn list_p2p_candidates_inner(
     verify_relay_auth(
         state.db_path(),
         &mut inner,
-        request.requester_account_id,
-        request.requester_device_id,
-        &requester_public,
-        "list_p2p_candidates",
+        RelayAuthScope {
+            account_id: request.requester_account_id,
+            device_id: request.requester_device_id,
+            device_signing_public: &requester_public,
+            action: "list_p2p_candidates",
+        },
         &signed_request,
         request.auth.as_ref(),
     )?;
@@ -863,10 +877,12 @@ async fn handle_p2p_probe(
     verify_relay_auth(
         state.db_path(),
         &mut inner,
-        request.account_id,
-        request.device_id,
-        &device_public,
-        "p2p_probe",
+        RelayAuthScope {
+            account_id: request.account_id,
+            device_id: request.device_id,
+            device_signing_public: &device_public,
+            action: "p2p_probe",
+        },
         &signed_request,
         request.auth.as_ref(),
     )?;
@@ -907,10 +923,12 @@ async fn send_message_inner(
     verify_relay_auth(
         state.db_path(),
         &mut inner,
-        sender_account_id,
-        sender_device_id,
-        &sender_public,
-        "send_message",
+        RelayAuthScope {
+            account_id: sender_account_id,
+            device_id: sender_device_id,
+            device_signing_public: &sender_public,
+            action: "send_message",
+        },
         &signed_request,
         request.auth.as_ref(),
     )?;
@@ -1006,10 +1024,12 @@ async fn drain_messages_inner(
     verify_relay_auth(
         state.db_path(),
         &mut inner,
-        request.account_id,
-        request.device_id,
-        &device_public,
-        "drain_messages",
+        RelayAuthScope {
+            account_id: request.account_id,
+            device_id: request.device_id,
+            device_signing_public: &device_public,
+            action: "drain_messages",
+        },
         &signed_request,
         request.auth.as_ref(),
     )?;
@@ -1097,10 +1117,12 @@ async fn send_receipt_inner(
     verify_relay_auth(
         state.db_path(),
         &mut inner,
-        request.from_account_id,
-        request.from_device_id,
-        &sender_public,
-        "send_receipt",
+        RelayAuthScope {
+            account_id: request.from_account_id,
+            device_id: request.from_device_id,
+            device_signing_public: &sender_public,
+            action: "send_receipt",
+        },
         &signed_request,
         request.auth.as_ref(),
     )?;
@@ -1155,10 +1177,12 @@ async fn drain_receipts_inner(
     verify_relay_auth(
         state.db_path(),
         &mut inner,
-        request.account_id,
-        request.device_id,
-        &device_public,
-        "drain_receipts",
+        RelayAuthScope {
+            account_id: request.account_id,
+            device_id: request.device_id,
+            device_signing_public: &device_public,
+            action: "drain_receipts",
+        },
         &signed_request,
         request.auth.as_ref(),
     )?;
@@ -1189,28 +1213,38 @@ fn device_signing_public(
         .map(|bundle| bundle.identity.device_signing_public)
 }
 
+struct RelayAuthScope<'a> {
+    account_id: AccountId,
+    device_id: DeviceId,
+    device_signing_public: &'a [u8; 32],
+    action: &'a str,
+}
+
 fn verify_relay_auth<T: serde::Serialize>(
     db_path: Option<&Path>,
     inner: &mut RelayState,
-    account_id: AccountId,
-    device_id: DeviceId,
-    device_signing_public: &[u8; 32],
-    action: &str,
+    scope: RelayAuthScope<'_>,
     unsigned_request: &T,
     auth: Option<&RelayAuth>,
 ) -> Result<(), StatusCode> {
     let auth = auth.ok_or(StatusCode::UNAUTHORIZED)?;
-    if auth.account_id != account_id || auth.device_id != device_id {
+    if auth.account_id != scope.account_id || auth.device_id != scope.device_id {
         return Err(StatusCode::UNAUTHORIZED);
     }
     let now = now_unix();
-    verify_relay_auth_for_request(device_signing_public, action, unsigned_request, auth, now)
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    verify_relay_auth_for_request(
+        scope.device_signing_public,
+        scope.action,
+        unsigned_request,
+        auth,
+        now,
+    )
+    .map_err(|_| StatusCode::UNAUTHORIZED)?;
     prune_expired_auth_nonces(db_path, now).map_err(|err| {
         tracing::error!(%err, "prune auth nonces failed");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    let nonces = inner.auth_nonces.entry(device_id).or_default();
+    let nonces = inner.auth_nonces.entry(scope.device_id).or_default();
     nonces.retain(|record| record.issued_unix + secure_chat_core::RELAY_AUTH_MAX_SKEW_SECS >= now);
     if nonces.iter().any(|record| record.nonce == auth.nonce) {
         return Err(StatusCode::UNAUTHORIZED);
@@ -1219,14 +1253,14 @@ fn verify_relay_auth<T: serde::Serialize>(
         issued_unix: auth.issued_unix,
         nonce: auth.nonce,
     };
-    persist_auth_nonce(db_path, device_id, &record).map_err(|err| {
+    persist_auth_nonce(db_path, scope.device_id, &record).map_err(|err| {
         tracing::error!(%err, "persist auth nonce failed");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     nonces.push_back(record);
     while nonces.len() > MAX_AUTH_NONCES_PER_DEVICE {
         if let Some(old) = nonces.pop_front() {
-            if let Err(err) = delete_auth_nonce(db_path, device_id, &old.nonce) {
+            if let Err(err) = delete_auth_nonce(db_path, scope.device_id, &old.nonce) {
                 tracing::warn!(%err, "delete old auth nonce failed");
             }
         }
@@ -1405,7 +1439,7 @@ fn retain_live_observed_candidates(
 fn prune_p2p_candidate_list(candidates: &mut Vec<P2pCandidate>) {
     let now = now_unix();
     candidates.retain(|candidate| candidate.expires_unix >= now);
-    candidates.sort_by(|left, right| right.updated_unix.cmp(&left.updated_unix));
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.updated_unix));
     candidates.truncate(8);
 }
 

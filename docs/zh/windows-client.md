@@ -1,6 +1,6 @@
 # SecureChat Windows 客户端说明
 
-Windows 客户端从 v0.2.6 开始加入，目标是与 macOS、iOS、Android 的 v0.2.5
+Windows 客户端从 v0.2.6 开始加入，目标是与 macOS、iOS、Android 的 v0.2.6
 聊天能力对齐。它使用 WinUI 3、Windows App SDK、C# P/Invoke 和
 `secure_chat_ffi.dll`，协议、加密、附件分片、阅后即焚和本地数据库逻辑仍由 Rust
 runtime 处理。
@@ -31,6 +31,10 @@ runtime 处理。
 
 正式公开分发时，请用可信代码签名证书替换测试证书，并在 Release notes 中公布
 证书指纹和 SHA-256。
+
+说明：macOS 构建机可以验证项目文件，但不能直接生成可运行的 WinUI 3 EXE/MSIX。
+如果 Release 页面还没有 Windows 资产，需要在 Windows 10 22H2+ 或 Windows 11
+构建机上运行上面的脚本后再补发。
 
 ## 功能范围
 

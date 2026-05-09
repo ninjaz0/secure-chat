@@ -201,6 +201,15 @@ impl MessageStatus {
     }
 }
 
+struct StoredMessageInput<'a> {
+    direction: MessageDirection,
+    body: &'a str,
+    status: MessageStatus,
+    relay_ciphertext: Option<Vec<u8>>,
+    remote_message_id: Option<String>,
+    storage_key: &'a Key32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InviteResponse {
     pub invite_uri: String,
@@ -646,12 +655,14 @@ impl DesktopRuntime {
         runtime.save_temporary_session(&connection.id, &session)?;
         runtime.insert_temporary_message(
             &connection.id,
-            MessageDirection::Outgoing,
-            body,
-            MessageStatus::Sent,
-            Some(relay_ciphertext),
-            Some(sent.id.to_string()),
-            &storage_key,
+            StoredMessageInput {
+                direction: MessageDirection::Outgoing,
+                body,
+                status: MessageStatus::Sent,
+                relay_ciphertext: Some(relay_ciphertext),
+                remote_message_id: Some(sent.id.to_string()),
+                storage_key: &storage_key,
+            },
         )?;
         runtime.snapshot()
     }
@@ -692,12 +703,14 @@ impl DesktopRuntime {
             .await?;
         runtime.insert_message(
             contact_id,
-            MessageDirection::Outgoing,
-            body,
-            MessageStatus::Sent,
-            Some(relay_ciphertext),
-            Some(remote_message_id),
-            &storage_key,
+            StoredMessageInput {
+                direction: MessageDirection::Outgoing,
+                body,
+                status: MessageStatus::Sent,
+                relay_ciphertext: Some(relay_ciphertext),
+                remote_message_id: Some(remote_message_id),
+                storage_key: &storage_key,
+            },
         )?;
         runtime.snapshot()
     }
@@ -881,12 +894,14 @@ impl DesktopRuntime {
                 {
                     runtime.insert_message(
                         &contact.id,
-                        MessageDirection::Incoming,
-                        &plain.body,
-                        MessageStatus::Received,
-                        Some(item.ciphertext),
-                        Some(item.id.to_string()),
-                        &storage_key,
+                        StoredMessageInput {
+                            direction: MessageDirection::Incoming,
+                            body: &plain.body,
+                            status: MessageStatus::Received,
+                            relay_ciphertext: Some(item.ciphertext),
+                            remote_message_id: Some(item.id.to_string()),
+                            storage_key: &storage_key,
+                        },
                     )?;
                 }
             } else {
@@ -909,12 +924,14 @@ impl DesktopRuntime {
                 {
                     runtime.insert_temporary_message(
                         &connection.id,
-                        MessageDirection::Incoming,
-                        &plain.body,
-                        MessageStatus::Received,
-                        Some(item.ciphertext),
-                        Some(item.id.to_string()),
-                        &storage_key,
+                        StoredMessageInput {
+                            direction: MessageDirection::Incoming,
+                            body: &plain.body,
+                            status: MessageStatus::Received,
+                            relay_ciphertext: Some(item.ciphertext),
+                            remote_message_id: Some(item.id.to_string()),
+                            storage_key: &storage_key,
+                        },
                     )?;
                 }
             }
@@ -1137,12 +1154,14 @@ impl DesktopRuntime {
                 if insert_visible {
                     self.insert_message(
                         thread_id,
-                        MessageDirection::Outgoing,
-                        body,
-                        MessageStatus::Sent,
-                        Some(relay_ciphertext),
-                        Some(remote_message_id),
-                        &storage_key,
+                        StoredMessageInput {
+                            direction: MessageDirection::Outgoing,
+                            body,
+                            status: MessageStatus::Sent,
+                            relay_ciphertext: Some(relay_ciphertext),
+                            remote_message_id: Some(remote_message_id),
+                            storage_key: &storage_key,
+                        },
                     )?;
                 }
             }
@@ -1156,12 +1175,14 @@ impl DesktopRuntime {
                 if insert_visible {
                     self.insert_temporary_message(
                         thread_id,
-                        MessageDirection::Outgoing,
-                        body,
-                        MessageStatus::Sent,
-                        Some(relay_ciphertext),
-                        Some(remote_message_id),
-                        &storage_key,
+                        StoredMessageInput {
+                            direction: MessageDirection::Outgoing,
+                            body,
+                            status: MessageStatus::Sent,
+                            relay_ciphertext: Some(relay_ciphertext),
+                            remote_message_id: Some(remote_message_id),
+                            storage_key: &storage_key,
+                        },
                     )?;
                 }
             }
@@ -1266,32 +1287,33 @@ impl DesktopRuntime {
         body: &str,
     ) -> Result<(), DesktopError> {
         let storage_key = self.load_storage_key()?;
+        let status = if direction == MessageDirection::Incoming {
+            MessageStatus::Received
+        } else {
+            MessageStatus::Sent
+        };
         match thread_kind {
             ThreadKind::Contact => self.insert_message(
                 thread_id,
-                direction,
-                body,
-                if direction == MessageDirection::Incoming {
-                    MessageStatus::Received
-                } else {
-                    MessageStatus::Sent
+                StoredMessageInput {
+                    direction,
+                    body,
+                    status,
+                    relay_ciphertext: None,
+                    remote_message_id: None,
+                    storage_key: &storage_key,
                 },
-                None,
-                None,
-                &storage_key,
             ),
             ThreadKind::Temporary => self.insert_temporary_message(
                 thread_id,
-                direction,
-                body,
-                if direction == MessageDirection::Incoming {
-                    MessageStatus::Received
-                } else {
-                    MessageStatus::Sent
+                StoredMessageInput {
+                    direction,
+                    body,
+                    status,
+                    relay_ciphertext: None,
+                    remote_message_id: None,
+                    storage_key: &storage_key,
                 },
-                None,
-                None,
-                &storage_key,
             ),
         }
     }
@@ -2219,14 +2241,9 @@ impl DesktopRuntime {
     fn insert_message(
         &self,
         contact_id: &str,
-        direction: MessageDirection,
-        body: &str,
-        status: MessageStatus,
-        relay_ciphertext: Option<Vec<u8>>,
-        remote_message_id: Option<String>,
-        storage_key: &Key32,
+        input: StoredMessageInput<'_>,
     ) -> Result<(), DesktopError> {
-        let (nonce, body_ciphertext) = encrypt_body(storage_key, body)?;
+        let (nonce, body_ciphertext) = encrypt_body(input.storage_key, input.body)?;
         let now = now_unix();
         self.conn.execute(
             "INSERT INTO messages
@@ -2235,14 +2252,14 @@ impl DesktopRuntime {
             params![
                 Uuid::new_v4().to_string(),
                 contact_id,
-                direction.as_str(),
+                input.direction.as_str(),
                 nonce.to_vec(),
                 body_ciphertext,
-                relay_ciphertext,
-                remote_message_id,
-                status.as_str(),
+                input.relay_ciphertext,
+                input.remote_message_id,
+                input.status.as_str(),
                 now,
-                if direction == MessageDirection::Incoming {
+                if input.direction == MessageDirection::Incoming {
                     Some(now as i64)
                 } else {
                     None
@@ -2259,14 +2276,9 @@ impl DesktopRuntime {
     fn insert_temporary_message(
         &self,
         connection_id: &str,
-        direction: MessageDirection,
-        body: &str,
-        status: MessageStatus,
-        relay_ciphertext: Option<Vec<u8>>,
-        remote_message_id: Option<String>,
-        storage_key: &Key32,
+        input: StoredMessageInput<'_>,
     ) -> Result<(), DesktopError> {
-        let (nonce, body_ciphertext) = encrypt_body(storage_key, body)?;
+        let (nonce, body_ciphertext) = encrypt_body(input.storage_key, input.body)?;
         let now = now_unix();
         self.conn.execute(
             "INSERT INTO temporary_messages
@@ -2275,14 +2287,14 @@ impl DesktopRuntime {
             params![
                 Uuid::new_v4().to_string(),
                 connection_id,
-                direction.as_str(),
+                input.direction.as_str(),
                 nonce.to_vec(),
                 body_ciphertext,
-                relay_ciphertext,
-                remote_message_id,
-                status.as_str(),
+                input.relay_ciphertext,
+                input.remote_message_id,
+                input.status.as_str(),
                 now,
-                if direction == MessageDirection::Incoming {
+                if input.direction == MessageDirection::Incoming {
                     Some(now as i64)
                 } else {
                     None
@@ -2394,21 +2406,25 @@ impl DesktopRuntime {
                 match thread_kind {
                     ThreadKind::Contact => self.insert_message(
                         thread_id,
-                        MessageDirection::Incoming,
-                        &visible_body,
-                        MessageStatus::Received,
-                        None,
-                        None,
-                        storage_key,
+                        StoredMessageInput {
+                            direction: MessageDirection::Incoming,
+                            body: &visible_body,
+                            status: MessageStatus::Received,
+                            relay_ciphertext: None,
+                            remote_message_id: None,
+                            storage_key,
+                        },
                     )?,
                     ThreadKind::Temporary => self.insert_temporary_message(
                         thread_id,
-                        MessageDirection::Incoming,
-                        &visible_body,
-                        MessageStatus::Received,
-                        None,
-                        None,
-                        storage_key,
+                        StoredMessageInput {
+                            direction: MessageDirection::Incoming,
+                            body: &visible_body,
+                            status: MessageStatus::Received,
+                            relay_ciphertext: None,
+                            remote_message_id: None,
+                            storage_key,
+                        },
                     )?,
                 }
             }

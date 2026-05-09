@@ -14,17 +14,12 @@ use thiserror::Error;
 pub type Key32 = [u8; 32];
 pub type Nonce12 = [u8; 12];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CipherSuite {
+    #[default]
     ChaCha20Poly1305,
     Aes256Gcm,
-}
-
-impl Default for CipherSuite {
-    fn default() -> Self {
-        Self::ChaCha20Poly1305
-    }
 }
 
 #[derive(Debug, Error)]
@@ -88,7 +83,7 @@ pub fn derive_initial_secret(
         &[b"initial-secret".as_slice(), transcript_hash].concat(),
         32,
     )?;
-    Ok(out.try_into().map_err(|_| CryptoError::KdfFailed)?)
+    out.try_into().map_err(|_| CryptoError::KdfFailed)
 }
 
 pub fn kdf_root(root_key: &Key32, dh_output: &Key32) -> Result<(Key32, Key32), CryptoError> {
