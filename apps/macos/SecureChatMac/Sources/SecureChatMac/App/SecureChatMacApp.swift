@@ -6,6 +6,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
     }
+
+    func application(_ application: NSApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        Task { @MainActor in
+            PushRegistrationService.shared.didRegister(deviceToken: deviceToken)
+        }
+    }
+
+    func application(_ application: NSApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        Task { @MainActor in
+            PushRegistrationService.shared.didFail(error: error)
+        }
+    }
 }
 
 @main
@@ -23,6 +35,7 @@ struct SecureChatMacApp: App {
                         NotificationService.requestAuthorization()
                     }
                     await store.loadAppSnapshot()
+                    PushRegistrationService.shared.configure(store: store)
                 }
         }
         .commands {

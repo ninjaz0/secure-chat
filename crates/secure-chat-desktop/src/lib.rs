@@ -9,9 +9,11 @@ use secure_chat_core::crypto::{
 };
 use secure_chat_core::safety::to_hex;
 use secure_chat_core::{
-    accept_session_as_responder_consuming_prekey, safety_number, start_session_as_initiator,
-    DeviceKeyMaterial, Invite, InviteMode, PlainMessage, PublicDeviceIdentity, RatchetSession,
-    ReceiptKind, ReceiptRequest, SendRequest, TransportFrame, TransportKind,
+    accept_session_as_responder_consuming_prekey, decode_group_control, encode_group_control,
+    safety_number, start_session_as_initiator, ApnsPlatform, DeviceKeyMaterial,
+    GroupControlMessage, GroupMember, GroupPlainMessage, GroupState, GroupTransportEnvelope,
+    Invite, InviteMode, PlainMessage, PublicDeviceIdentity, RatchetSession, ReceiptKind,
+    ReceiptRequest, SendRequest, TransportFrame, TransportKind, GROUP_TRANSPORT_KIND,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -64,6 +66,10 @@ pub enum DesktopError {
     EmptyContactName,
     #[error("message body cannot be empty")]
     EmptyMessage,
+    #[error("group not found")]
+    GroupNotFound,
+    #[error("group name cannot be empty")]
+    EmptyGroupName,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -72,6 +78,8 @@ pub struct AppSnapshot {
     pub profile: Option<AppProfile>,
     pub contacts: Vec<ContactSummary>,
     pub messages: Vec<ChatMessageView>,
+    pub groups: Vec<GroupSummary>,
+    pub group_messages: Vec<GroupMessageView>,
     pub temporary_connections: Vec<TemporaryConnectionSummary>,
     pub temporary_messages: Vec<TemporaryMessageView>,
 }
@@ -101,6 +109,34 @@ pub struct ContactSummary {
 pub struct ChatMessageView {
     pub id: String,
     pub contact_id: String,
+    pub direction: MessageDirection,
+    pub body: String,
+    pub status: MessageStatus,
+    pub sent_at_unix: u64,
+    pub received_at_unix: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupSummary {
+    pub id: String,
+    pub display_name: String,
+    pub member_count: usize,
+    pub last_message: Option<String>,
+    pub updated_at_unix: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupMemberView {
+    pub display_name: String,
+    pub account_id: String,
+    pub device_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupMessageView {
+    pub id: String,
+    pub group_id: String,
+    pub sender_display_name: String,
     pub direction: MessageDirection,
     pub body: String,
     pub status: MessageStatus,
@@ -238,6 +274,16 @@ struct ContactRecord {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct GroupRecord {
+    id: String,
+    display_name: String,
+    epoch: u64,
+    secret_nonce: Vec<u8>,
+    secret_ciphertext: Vec<u8>,
+    updated_at_unix: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct TemporaryConnectionRecord {
     id: String,
     display_name: String,
@@ -285,6 +331,8 @@ impl DesktopRuntime {
                 profile: None,
                 contacts: Vec::new(),
                 messages: Vec::new(),
+                groups: Vec::new(),
+                group_messages: Vec::new(),
                 temporary_connections: Vec::new(),
                 temporary_messages: Vec::new(),
             });
@@ -295,6 +343,8 @@ impl DesktopRuntime {
         let storage_key = self.load_storage_key()?;
         let contacts = self.contact_summaries(&storage_key)?;
         let messages = self.message_views(&storage_key)?;
+        let groups = self.group_summaries(&storage_key)?;
+        let group_messages = self.group_message_views(&storage_key)?;
         let temporary_connections = self.temporary_connection_summaries(&storage_key)?;
         let temporary_messages = self.temporary_message_views(&storage_key)?;
         Ok(AppSnapshot {
@@ -308,6 +358,8 @@ impl DesktopRuntime {
             }),
             contacts,
             messages,
+            groups,
+            group_messages,
             temporary_connections,
             temporary_messages,
         })
@@ -503,60 +555,152 @@ impl DesktopRuntime {
         let contact = runtime
             .contact(contact_id)?
             .ok_or(DesktopError::ContactNotFound)?;
+        let (relay_ciphertext, remote_message_id) = runtime
+            .send_contact_plaintext(
+                &profile,
+                &keys,
+                &contact,
+                body,
+                Some(now_unix() + 7 * 24 * 60 * 60),
+            )
+            .await?;
+        runtime.insert_message(
+            contact_id,
+            MessageDirection::Outgoing,
+            body,
+            MessageStatus::Sent,
+            Some(relay_ciphertext),
+            Some(remote_message_id),
+            &storage_key,
+        )?;
+        runtime.snapshot()
+    }
+
+    pub async fn create_group(
+        data_dir: impl AsRef<Path>,
+        display_name: &str,
+    ) -> Result<AppSnapshot, DesktopError> {
+        let display_name = display_name.trim();
+        if display_name.is_empty() {
+            return Err(DesktopError::EmptyGroupName);
+        }
+        let runtime = Self::open(data_dir)?;
+        let profile = runtime.ensure_profile()?;
+        let keys = runtime.load_device_keys()?;
+        let storage_key = runtime.load_storage_key()?;
+        let group = GroupState::create(display_name, profile.display_name, keys.public_identity())?;
+        runtime.save_group_state(&group, &storage_key)?;
+        runtime.snapshot()
+    }
+
+    pub async fn add_group_member(
+        data_dir: impl AsRef<Path>,
+        group_id: &str,
+        contact_id: &str,
+    ) -> Result<AppSnapshot, DesktopError> {
+        let runtime = Self::open(data_dir)?;
+        let profile = runtime.ensure_profile()?;
+        let keys = runtime.load_device_keys()?;
+        let storage_key = runtime.load_storage_key()?;
+        let mut group = runtime
+            .load_group_state(group_id, &storage_key)?
+            .ok_or(DesktopError::GroupNotFound)?;
+        let contact = runtime
+            .contact(contact_id)?
+            .ok_or(DesktopError::ContactNotFound)?;
+        let remote: PublicDeviceIdentity = serde_json::from_str(&contact.remote_identity_json)?;
+        let welcome = group.add_member(contact.display_name.clone(), remote)?;
+        runtime.save_group_state(&group, &storage_key)?;
+        let control = GroupControlMessage::Welcome(welcome);
+        let body = encode_group_control(&control)?;
+        let _ = runtime
+            .send_contact_plaintext(
+                &profile,
+                &keys,
+                &contact,
+                &body,
+                Some(now_unix() + 7 * 24 * 60 * 60),
+            )
+            .await?;
+        runtime.snapshot()
+    }
+
+    pub async fn send_group_message(
+        data_dir: impl AsRef<Path>,
+        group_id: &str,
+        body: &str,
+    ) -> Result<AppSnapshot, DesktopError> {
+        if body.trim().is_empty() {
+            return Err(DesktopError::EmptyMessage);
+        }
+        let runtime = Self::open(data_dir)?;
+        let profile = runtime.ensure_profile()?;
+        let keys = runtime.load_device_keys()?;
+        let storage_key = runtime.load_storage_key()?;
+        let group = runtime
+            .load_group_state(group_id, &storage_key)?
+            .ok_or(DesktopError::GroupNotFound)?;
         let relay = RelayClient::new(profile.relay_url);
         relay.register_device(&keys).await?;
-
-        let mut session = runtime.load_session(contact_id)?;
-        let initial = if session.is_some() {
-            None
-        } else if let Some(invite_uri) = &contact.invite_uri {
-            let invite = Invite::from_uri(invite_uri)?;
-            let (initial, created_session) =
-                start_session_as_initiator(&keys, &invite.bundle, CipherSuite::default())?;
-            session = Some(created_session);
-            Some(initial)
-        } else {
-            None
-        };
-        let mut session = session.ok_or(DesktopError::ContactNotFound)?;
-        let wire = session.encrypt(PlainMessage {
-            sent_at_unix: now_unix(),
-            body: body.to_string(),
-        })?;
-        let envelope = RelayEnvelope { initial, wire };
+        let wire = group.encrypt_message(
+            &keys.public_identity(),
+            GroupPlainMessage {
+                sent_at_unix: now_unix(),
+                body: body.to_string(),
+            },
+        )?;
+        let envelope = group.transport_envelope(wire);
         let payload = serde_json::to_vec(&envelope)?;
         let frame = TransportFrame::protect(&payload, &padding_profile(payload.len()))?;
         let relay_ciphertext = serde_json::to_vec(&frame)?;
-        relay
-            .send(
-                &keys,
-                SendRequest {
-                    sender_account_id: Some(keys.account_id),
-                    sender_device_id: Some(keys.device_id),
-                    to_account_id: session.remote_identity.account_id,
-                    to_device_id: session.remote_identity.device_id,
-                    transport_kind: TransportKind::WebSocketTls,
-                    sealed_sender: None,
-                    ciphertext: relay_ciphertext.clone(),
-                    expires_unix: Some(now_unix() + 7 * 24 * 60 * 60),
-                    auth: None,
-                },
-            )
-            .await
-            .map(|sent| {
-                runtime
-                    .insert_message(
-                        contact_id,
-                        MessageDirection::Outgoing,
-                        body,
-                        MessageStatus::Sent,
-                        Some(relay_ciphertext),
-                        Some(sent.id.to_string()),
-                        &storage_key,
-                    )
-                    .map(|_| sent)
-            })??;
-        runtime.save_session(contact_id, &session)?;
+        let mut remote_message_ids = Vec::new();
+        for member in &group.members {
+            if member.identity.device_id == keys.device_id {
+                continue;
+            }
+            let sent = relay
+                .send(
+                    &keys,
+                    SendRequest {
+                        sender_account_id: Some(keys.account_id),
+                        sender_device_id: Some(keys.device_id),
+                        to_account_id: member.identity.account_id,
+                        to_device_id: member.identity.device_id,
+                        transport_kind: TransportKind::WebSocketTls,
+                        sealed_sender: None,
+                        ciphertext: relay_ciphertext.clone(),
+                        expires_unix: Some(now_unix() + 7 * 24 * 60 * 60),
+                        auth: None,
+                    },
+                )
+                .await?;
+            remote_message_ids.push(sent.id.to_string());
+        }
+        runtime.insert_group_message(
+            group_id,
+            keys.device_id,
+            "You",
+            MessageDirection::Outgoing,
+            body,
+            MessageStatus::Sent,
+            Some(relay_ciphertext),
+            remote_message_ids.first().cloned(),
+            &storage_key,
+        )?;
+        runtime.snapshot()
+    }
+
+    pub async fn register_push_token(
+        data_dir: impl AsRef<Path>,
+        token: &str,
+        platform: ApnsPlatform,
+    ) -> Result<AppSnapshot, DesktopError> {
+        let runtime = Self::open(data_dir)?;
+        let profile = runtime.ensure_profile()?;
+        let keys = runtime.load_device_keys()?;
+        RelayClient::new(profile.relay_url)
+            .register_apns_token(&keys, token, platform)
+            .await?;
         runtime.snapshot()
     }
 
@@ -574,7 +718,57 @@ impl DesktopRuntime {
 
         for item in queued {
             let frame: TransportFrame = serde_json::from_slice(&item.ciphertext)?;
-            let envelope: RelayEnvelope = serde_json::from_slice(&frame.expose()?)?;
+            let exposed = frame.expose()?;
+            if let Ok(envelope) = serde_json::from_slice::<GroupTransportEnvelope>(&exposed) {
+                if envelope.kind == GROUP_TRANSPORT_KIND {
+                    if let Some(group) =
+                        runtime.load_group_state(&envelope.group_id.to_string(), &storage_key)?
+                    {
+                        let plain = group.decrypt_message(&envelope.wire)?;
+                        let sender_display_name = group
+                            .members
+                            .iter()
+                            .find(|member| {
+                                member.identity.device_id == envelope.wire.sender_device_id
+                            })
+                            .map(|member| member.display_name.as_str())
+                            .unwrap_or("Group member");
+                        runtime.insert_group_message(
+                            &envelope.group_id.to_string(),
+                            envelope.wire.sender_device_id,
+                            sender_display_name,
+                            MessageDirection::Incoming,
+                            &plain.body,
+                            MessageStatus::Received,
+                            Some(item.ciphertext),
+                            Some(item.id.to_string()),
+                            &storage_key,
+                        )?;
+                        if let (Some(sender_account_id), Some(sender_device_id)) =
+                            (item.sender_account_id, item.sender_device_id)
+                        {
+                            let _ = relay
+                                .send_receipt(
+                                    &keys,
+                                    ReceiptRequest {
+                                        message_id: item.id,
+                                        from_account_id: keys.account_id,
+                                        from_device_id: keys.device_id,
+                                        to_account_id: sender_account_id,
+                                        to_device_id: sender_device_id,
+                                        kind: ReceiptKind::Read,
+                                        at_unix: now_unix(),
+                                        auth: None,
+                                    },
+                                )
+                                .await;
+                        }
+                        received_count += 1;
+                    }
+                    continue;
+                }
+            }
+            let envelope: RelayEnvelope = serde_json::from_slice(&exposed)?;
             let remote_device_id = envelope.wire.sender_device_id;
             let contact = runtime.contact_by_device(&remote_device_id.to_string())?;
             let mut temporary_connection = if contact.is_none() {
@@ -607,17 +801,20 @@ impl DesktopRuntime {
             }
             let mut session = session.ok_or(DesktopError::ContactNotFound)?;
             let plain = session.decrypt(&envelope.wire)?;
+            let handled_control = runtime.handle_group_control(&plain.body, &storage_key)?;
             if let Some(contact) = contact {
                 runtime.save_session(&contact.id, &session)?;
-                runtime.insert_message(
-                    &contact.id,
-                    MessageDirection::Incoming,
-                    &plain.body,
-                    MessageStatus::Received,
-                    Some(item.ciphertext),
-                    Some(item.id.to_string()),
-                    &storage_key,
-                )?;
+                if !handled_control {
+                    runtime.insert_message(
+                        &contact.id,
+                        MessageDirection::Incoming,
+                        &plain.body,
+                        MessageStatus::Received,
+                        Some(item.ciphertext),
+                        Some(item.id.to_string()),
+                        &storage_key,
+                    )?;
+                }
             } else {
                 if temporary_connection.is_none() && new_incoming_session {
                     temporary_connection =
@@ -628,15 +825,17 @@ impl DesktopRuntime {
                 }
                 let connection = temporary_connection.ok_or(DesktopError::ContactNotFound)?;
                 runtime.save_temporary_session(&connection.id, &session)?;
-                runtime.insert_temporary_message(
-                    &connection.id,
-                    MessageDirection::Incoming,
-                    &plain.body,
-                    MessageStatus::Received,
-                    Some(item.ciphertext),
-                    Some(item.id.to_string()),
-                    &storage_key,
-                )?;
+                if !handled_control {
+                    runtime.insert_temporary_message(
+                        &connection.id,
+                        MessageDirection::Incoming,
+                        &plain.body,
+                        MessageStatus::Received,
+                        Some(item.ciphertext),
+                        Some(item.id.to_string()),
+                        &storage_key,
+                    )?;
+                }
             }
             if let (Some(sender_account_id), Some(sender_device_id)) =
                 (item.sender_account_id, item.sender_device_id)
@@ -716,6 +915,57 @@ impl DesktopRuntime {
         Ok(())
     }
 
+    async fn send_contact_plaintext(
+        &self,
+        profile: &ProfileRow,
+        keys: &DeviceKeyMaterial,
+        contact: &ContactRecord,
+        body: &str,
+        expires_unix: Option<u64>,
+    ) -> Result<(Vec<u8>, String), DesktopError> {
+        let relay = RelayClient::new(&profile.relay_url);
+        relay.register_device(keys).await?;
+        let mut session = self.load_session(&contact.id)?;
+        let initial = if session.is_some() {
+            None
+        } else if let Some(invite_uri) = &contact.invite_uri {
+            let invite = Invite::from_uri(invite_uri)?;
+            let (initial, created_session) =
+                start_session_as_initiator(keys, &invite.bundle, CipherSuite::default())?;
+            session = Some(created_session);
+            Some(initial)
+        } else {
+            None
+        };
+        let mut session = session.ok_or(DesktopError::ContactNotFound)?;
+        let wire = session.encrypt(PlainMessage {
+            sent_at_unix: now_unix(),
+            body: body.to_string(),
+        })?;
+        let envelope = RelayEnvelope { initial, wire };
+        let payload = serde_json::to_vec(&envelope)?;
+        let frame = TransportFrame::protect(&payload, &padding_profile(payload.len()))?;
+        let relay_ciphertext = serde_json::to_vec(&frame)?;
+        let sent = relay
+            .send(
+                keys,
+                SendRequest {
+                    sender_account_id: Some(keys.account_id),
+                    sender_device_id: Some(keys.device_id),
+                    to_account_id: session.remote_identity.account_id,
+                    to_device_id: session.remote_identity.device_id,
+                    transport_kind: TransportKind::WebSocketTls,
+                    sealed_sender: None,
+                    ciphertext: relay_ciphertext.clone(),
+                    expires_unix,
+                    auth: None,
+                },
+            )
+            .await?;
+        self.save_session(&contact.id, &session)?;
+        Ok((relay_ciphertext, sent.id.to_string()))
+    }
+
     fn migrate(&self) -> Result<(), DesktopError> {
         self.conn.execute_batch(
             r#"
@@ -749,6 +999,37 @@ impl DesktopRuntime {
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT PRIMARY KEY,
                 contact_id TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                body_nonce BLOB NOT NULL,
+                body_ciphertext BLOB NOT NULL,
+                relay_ciphertext BLOB,
+                remote_message_id TEXT,
+                status TEXT NOT NULL,
+                sent_at_unix INTEGER NOT NULL,
+                received_at_unix INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS groups (
+                id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                epoch INTEGER NOT NULL,
+                secret_nonce BLOB NOT NULL,
+                secret_ciphertext BLOB NOT NULL,
+                created_at_unix INTEGER NOT NULL,
+                updated_at_unix INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS group_members (
+                group_id TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                identity_json TEXT NOT NULL,
+                PRIMARY KEY(group_id, device_id)
+            );
+            CREATE TABLE IF NOT EXISTS group_messages (
+                id TEXT PRIMARY KEY,
+                group_id TEXT NOT NULL,
+                sender_device_id TEXT NOT NULL,
+                sender_display_name TEXT NOT NULL,
                 direction TEXT NOT NULL,
                 body_nonce BLOB NOT NULL,
                 body_ciphertext BLOB NOT NULL,
@@ -1214,6 +1495,93 @@ impl DesktopRuntime {
             .collect()
     }
 
+    fn group_summaries(&self, storage_key: &Key32) -> Result<Vec<GroupSummary>, DesktopError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, display_name, updated_at_unix FROM groups ORDER BY updated_at_unix DESC, display_name ASC",
+        )?;
+        let groups = statement
+            .query_map([], |row| {
+                Ok(GroupSummary {
+                    id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    member_count: 0,
+                    last_message: None,
+                    updated_at_unix: row.get::<_, i64>(2)? as u64,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        groups
+            .into_iter()
+            .map(|mut group| {
+                group.member_count = self.group_member_count(&group.id)?;
+                group.last_message = self.last_group_message(&group.id, storage_key)?;
+                Ok(group)
+            })
+            .collect()
+    }
+
+    fn group_message_views(
+        &self,
+        storage_key: &Key32,
+    ) -> Result<Vec<GroupMessageView>, DesktopError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, group_id, sender_display_name, direction, body_nonce, body_ciphertext, status, sent_at_unix, received_at_unix
+             FROM group_messages ORDER BY sent_at_unix ASC",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                let nonce: Vec<u8> = row.get(4)?;
+                let ciphertext: Vec<u8> = row.get(5)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    nonce,
+                    ciphertext,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                ))
+            })?
+            .map(|result| {
+                let (
+                    id,
+                    group_id,
+                    sender_display_name,
+                    direction,
+                    nonce,
+                    ciphertext,
+                    status,
+                    sent_at,
+                    received_at,
+                ) = result?;
+                let body = decrypt_body(storage_key, &nonce, &ciphertext)?;
+                Ok(GroupMessageView {
+                    id,
+                    group_id,
+                    sender_display_name,
+                    direction: MessageDirection::from_str(&direction),
+                    body,
+                    status: MessageStatus::from_str(&status),
+                    sent_at_unix: sent_at as u64,
+                    received_at_unix: received_at.map(|value| value as u64),
+                })
+            })
+            .collect();
+        rows
+    }
+
+    fn group_member_count(&self, group_id: &str) -> Result<usize, DesktopError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM group_members WHERE group_id = ?1",
+            params![group_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     fn temporary_connection_summaries(
         &self,
         storage_key: &Key32,
@@ -1352,6 +1720,23 @@ impl DesktopRuntime {
             .transpose()
     }
 
+    fn last_group_message(
+        &self,
+        group_id: &str,
+        storage_key: &Key32,
+    ) -> Result<Option<String>, DesktopError> {
+        let row: Option<(Vec<u8>, Vec<u8>)> = self
+            .conn
+            .query_row(
+                "SELECT body_nonce, body_ciphertext FROM group_messages WHERE group_id = ?1 ORDER BY sent_at_unix DESC LIMIT 1",
+                params![group_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        row.map(|(nonce, ciphertext)| decrypt_body(storage_key, &nonce, &ciphertext))
+            .transpose()
+    }
+
     fn last_temporary_message(
         &self,
         connection_id: &str,
@@ -1367,6 +1752,125 @@ impl DesktopRuntime {
             .optional()?;
         row.map(|(nonce, ciphertext)| decrypt_body(storage_key, &nonce, &ciphertext))
             .transpose()
+    }
+
+    fn load_group_state(
+        &self,
+        group_id: &str,
+        storage_key: &Key32,
+    ) -> Result<Option<GroupState>, DesktopError> {
+        let row: Option<GroupRecord> = self
+            .conn
+            .query_row(
+                "SELECT id, display_name, epoch, secret_nonce, secret_ciphertext, updated_at_unix
+                 FROM groups WHERE id = ?1",
+                params![group_id],
+                |row| {
+                    Ok(GroupRecord {
+                        id: row.get(0)?,
+                        display_name: row.get(1)?,
+                        epoch: row.get::<_, i64>(2)? as u64,
+                        secret_nonce: row.get(3)?,
+                        secret_ciphertext: row.get(4)?,
+                        updated_at_unix: row.get::<_, i64>(5)? as u64,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let nonce: [u8; 12] = row
+            .secret_nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| secure_chat_core::CryptoError::InvalidInput)?;
+        let secret = decrypt_secret(storage_key, &nonce, &row.secret_ciphertext)?;
+        let secret: Key32 = secret
+            .as_slice()
+            .try_into()
+            .map_err(|_| secure_chat_core::CryptoError::InvalidInput)?;
+        let mut members = Vec::new();
+        let mut statement = self.conn.prepare(
+            "SELECT display_name, identity_json FROM group_members WHERE group_id = ?1 ORDER BY display_name ASC",
+        )?;
+        let rows = statement.query_map(params![group_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (display_name, identity_json) = row?;
+            let identity_json = decrypt_text_if_needed(storage_key, &identity_json)?;
+            let identity: PublicDeviceIdentity = serde_json::from_str(&identity_json)?;
+            members.push(GroupMember {
+                display_name,
+                identity,
+            });
+        }
+        Ok(Some(GroupState {
+            group_id: Uuid::parse_str(&row.id)
+                .map_err(|err| DesktopError::InvalidData(err.to_string()))?,
+            display_name: row.display_name,
+            epoch: row.epoch,
+            secret,
+            members,
+        }))
+    }
+
+    fn save_group_state(
+        &self,
+        group: &GroupState,
+        storage_key: &Key32,
+    ) -> Result<(), DesktopError> {
+        let (secret_nonce, secret_ciphertext) = encrypt_secret(storage_key, &group.secret)?;
+        let now = now_unix();
+        self.conn.execute(
+            "INSERT INTO groups(id, display_name, epoch, secret_nonce, secret_ciphertext, created_at_unix, updated_at_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                display_name = excluded.display_name,
+                epoch = excluded.epoch,
+                secret_nonce = excluded.secret_nonce,
+                secret_ciphertext = excluded.secret_ciphertext,
+                updated_at_unix = excluded.updated_at_unix",
+            params![
+                group.group_id.to_string(),
+                group.display_name,
+                group.epoch as i64,
+                secret_nonce.to_vec(),
+                secret_ciphertext,
+                now
+            ],
+        )?;
+        self.conn.execute(
+            "DELETE FROM group_members WHERE group_id = ?1",
+            params![group.group_id.to_string()],
+        )?;
+        for member in &group.members {
+            let identity_json =
+                encrypt_text(storage_key, &serde_json::to_string(&member.identity)?)?;
+            self.conn.execute(
+                "INSERT INTO group_members(group_id, account_id, device_id, display_name, identity_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    group.group_id.to_string(),
+                    member.identity.account_id.to_string(),
+                    member.identity.device_id.to_string(),
+                    member.display_name,
+                    identity_json,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn handle_group_control(&self, body: &str, storage_key: &Key32) -> Result<bool, DesktopError> {
+        match decode_group_control(body)? {
+            Some(GroupControlMessage::Welcome(welcome)) => {
+                self.save_group_state(&GroupState::from_welcome(welcome)?, storage_key)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     fn load_session(&self, contact_id: &str) -> Result<Option<RatchetSession>, DesktopError> {
@@ -1491,6 +1995,50 @@ impl DesktopRuntime {
         self.conn.execute(
             "UPDATE contacts SET updated_at_unix = ?1 WHERE id = ?2",
             params![now, contact_id],
+        )?;
+        Ok(())
+    }
+
+    fn insert_group_message(
+        &self,
+        group_id: &str,
+        sender_device_id: Uuid,
+        sender_display_name: &str,
+        direction: MessageDirection,
+        body: &str,
+        status: MessageStatus,
+        relay_ciphertext: Option<Vec<u8>>,
+        remote_message_id: Option<String>,
+        storage_key: &Key32,
+    ) -> Result<(), DesktopError> {
+        let (nonce, body_ciphertext) = encrypt_body(storage_key, body)?;
+        let now = now_unix();
+        self.conn.execute(
+            "INSERT INTO group_messages
+             (id, group_id, sender_device_id, sender_display_name, direction, body_nonce, body_ciphertext, relay_ciphertext, remote_message_id, status, sent_at_unix, received_at_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                Uuid::new_v4().to_string(),
+                group_id,
+                sender_device_id.to_string(),
+                sender_display_name,
+                direction.as_str(),
+                nonce.to_vec(),
+                body_ciphertext,
+                relay_ciphertext,
+                remote_message_id,
+                status.as_str(),
+                now,
+                if direction == MessageDirection::Incoming {
+                    Some(now as i64)
+                } else {
+                    None
+                }
+            ],
+        )?;
+        self.conn.execute(
+            "UPDATE groups SET updated_at_unix = ?1 WHERE id = ?2",
+            params![now, group_id],
         )?;
         Ok(())
     }

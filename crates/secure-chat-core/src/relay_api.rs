@@ -96,6 +96,68 @@ pub struct P2pCandidatesResponse {
     pub candidates: Vec<P2pCandidate>,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ApnsPlatform {
+    Ios,
+    Macos,
+}
+
+impl ApnsPlatform {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ios => "ios",
+            Self::Macos => "macos",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RegisterApnsTokenRequest {
+    pub account_id: AccountId,
+    pub device_id: DeviceId,
+    pub token: String,
+    pub platform: ApnsPlatform,
+    pub auth: Option<RelayAuth>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeleteApnsTokenRequest {
+    pub account_id: AccountId,
+    pub device_id: DeviceId,
+    pub token: Option<String>,
+    pub auth: Option<RelayAuth>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RegisterApnsTokenResponse {
+    pub registered: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PublishMlsKeyPackageRequest {
+    pub account_id: AccountId,
+    pub device_id: DeviceId,
+    pub key_package: Vec<u8>,
+    pub auth: Option<RelayAuth>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClaimMlsKeyPackageRequest {
+    pub requester_account_id: AccountId,
+    pub requester_device_id: DeviceId,
+    pub target_account_id: AccountId,
+    pub target_device_id: DeviceId,
+    pub auth: Option<RelayAuth>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MlsKeyPackageResponse {
+    pub account_id: AccountId,
+    pub device_id: DeviceId,
+    pub key_package: Option<Vec<u8>>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendRequest {
     pub sender_account_id: Option<AccountId>,
@@ -168,6 +230,10 @@ pub enum RelayCommand {
     ListDevices { account_id: AccountId },
     PublishP2pCandidates(PublishP2pCandidatesRequest),
     ListP2pCandidates(ListP2pCandidatesRequest),
+    PublishMlsKeyPackage(PublishMlsKeyPackageRequest),
+    ClaimMlsKeyPackage(ClaimMlsKeyPackageRequest),
+    RegisterApnsToken(RegisterApnsTokenRequest),
+    DeleteApnsToken(DeleteApnsTokenRequest),
     SendMessage(SendRequest),
     DrainMessages(DrainRequest),
     SendReceipt(ReceiptRequest),
@@ -182,6 +248,10 @@ pub enum RelayCommandResponse {
     ListDevices(Vec<DevicePreKeyBundle>),
     PublishP2pCandidates(P2pCandidatesResponse),
     ListP2pCandidates(P2pCandidatesResponse),
+    PublishMlsKeyPackage(MlsKeyPackageResponse),
+    ClaimMlsKeyPackage(MlsKeyPackageResponse),
+    RegisterApnsToken(RegisterApnsTokenResponse),
+    DeleteApnsToken(RegisterApnsTokenResponse),
     SendMessage(QueuedMessage),
     DrainMessages(DrainResponse),
     SendReceipt(QueuedReceipt),

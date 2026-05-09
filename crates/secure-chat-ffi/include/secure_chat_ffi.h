@@ -20,6 +20,10 @@ char *secure_chat_app_add_contact_json(const char *data_dir, const char *display
 char *secure_chat_app_send_temporary_message_json(const char *data_dir, const char *connection_id, const char *body);
 char *secure_chat_app_end_temporary_connection_json(const char *data_dir, const char *connection_id);
 char *secure_chat_app_send_message_json(const char *data_dir, const char *contact_id, const char *body);
+char *secure_chat_app_create_group_json(const char *data_dir, const char *display_name);
+char *secure_chat_app_add_group_member_json(const char *data_dir, const char *group_id, const char *contact_id);
+char *secure_chat_app_send_group_message_json(const char *data_dir, const char *group_id, const char *body);
+char *secure_chat_app_register_push_token_json(const char *data_dir, const char *token, const char *platform);
 char *secure_chat_app_receive_json(const char *data_dir);
 char *secure_chat_app_p2p_probe_json(const char *data_dir);
 void secure_chat_free_string(char *ptr);

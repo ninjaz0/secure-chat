@@ -1,4 +1,5 @@
 pub mod crypto;
+pub mod group;
 pub mod identity;
 pub mod invite;
 pub mod protocol;
@@ -7,6 +8,11 @@ pub mod safety;
 pub mod transport;
 
 pub use crypto::{CipherSuite, CryptoError};
+pub use group::{
+    decode_group_control, encode_group_control, openmls_ciphersuite_label, GroupControlMessage,
+    GroupMember, GroupPlainMessage, GroupState, GroupTransportEnvelope, GroupWelcome,
+    GroupWireMessage, GROUP_CONTROL_PREFIX, GROUP_TRANSPORT_KIND,
+};
 pub use identity::{
     AccountId, DeviceId, DeviceKeyMaterial, DevicePreKeyBundle, PublicDeviceIdentity,
 };
@@ -16,10 +22,12 @@ pub use protocol::{
     PlainMessage, RatchetSession, WireMessage, MAX_SKIP,
 };
 pub use relay_api::{
-    sign_relay_auth_for_request, verify_relay_auth_for_request, DrainReceiptsResponse,
-    DrainRequest, DrainResponse, ListP2pCandidatesRequest, P2pCandidate, P2pCandidateDraft,
-    P2pCandidateKind, P2pCandidatesResponse, P2pProbeRequest, P2pProbeResponse,
-    PublishP2pCandidatesRequest, QueuedMessage, QueuedReceipt, ReceiptKind, ReceiptRequest,
+    sign_relay_auth_for_request, verify_relay_auth_for_request, ApnsPlatform,
+    ClaimMlsKeyPackageRequest, DeleteApnsTokenRequest, DrainReceiptsResponse, DrainRequest,
+    DrainResponse, ListP2pCandidatesRequest, MlsKeyPackageResponse, P2pCandidate,
+    P2pCandidateDraft, P2pCandidateKind, P2pCandidatesResponse, P2pProbeRequest, P2pProbeResponse,
+    PublishMlsKeyPackageRequest, PublishP2pCandidatesRequest, QueuedMessage, QueuedReceipt,
+    ReceiptKind, ReceiptRequest, RegisterApnsTokenRequest, RegisterApnsTokenResponse,
     RegisterRequest, RegisterResponse, RelayAuth, RelayCommand, RelayCommandResponse, SendRequest,
     P2P_CANDIDATE_TTL_SECS, P2P_RENDEZVOUS_DEFAULT_PORT, RELAY_AUTH_MAX_SKEW_SECS, RELAY_QUIC_ALPN,
 };

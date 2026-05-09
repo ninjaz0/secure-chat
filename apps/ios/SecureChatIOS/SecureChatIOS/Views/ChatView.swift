@@ -137,6 +137,86 @@ struct TemporaryChatView: View {
     }
 }
 
+struct GroupChatView: View {
+    @EnvironmentObject private var store: SecureChatStore
+    let group: AppGroup
+    @State private var draft = ""
+
+    private var currentGroup: AppGroup {
+        store.appSnapshot?.groups.first { $0.id == group.id } ?? group
+    }
+
+    private var messages: [AppGroupMessage] {
+        store.appSnapshot?.groupMessages.filter { $0.groupId == group.id } ?? []
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            GroupBanner(group: currentGroup)
+            Divider()
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        ForEach(messages) { message in
+                            VStack(alignment: message.direction == .outgoing ? .trailing : .leading, spacing: 4) {
+                                if message.direction == .incoming {
+                                    Text(message.senderDisplayName)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                MessageBubble(
+                                    direction: message.direction,
+                                    messageBody: message.body,
+                                    status: message.status,
+                                    sentAtUnix: message.sentAtUnix,
+                                    receivedAtUnix: message.receivedAtUnix,
+                                    showsStatus: store.showMessageStatus,
+                                    showsTimestamp: store.showMessageTimestamps
+                                )
+                            }
+                            .id(message.id)
+                        }
+                    }
+                    .padding(14)
+                }
+                .onChange(of: messages.count) { _ in
+                    if let last = messages.last {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
+            }
+            Divider()
+            ComposerView(draft: $draft) {
+                let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                draft = ""
+                Task { await store.sendGroupMessage(text) }
+            }
+        }
+        .navigationTitle(currentGroup.displayName)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button {
+                    Task { await store.addSelectedContactToSelectedGroup() }
+                } label: {
+                    Image(systemName: "person.badge.plus")
+                }
+                .disabled(store.selectedContactID == nil)
+
+                Button {
+                    Task { await store.receiveMessages() }
+                } label: {
+                    Image(systemName: "tray.and.arrow.down")
+                }
+            }
+        }
+        .onAppear {
+            store.selectedGroupID = group.id
+            store.selectedTemporaryConnectionID = nil
+        }
+    }
+}
+
 private struct SafetyBanner: View {
     let contact: AppContact
 
@@ -154,6 +234,28 @@ private struct SafetyBanner: View {
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
                 .lineLimit(2)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+}
+
+private struct GroupBanner: View {
+    let group: AppGroup
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "person.3.fill")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("MLS group")
+                    .font(.subheadline.weight(.semibold))
+                Text("\(group.memberCount) members")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

@@ -1,14 +1,16 @@
 use rustls_pki_types::{pem::PemObject, CertificateDer};
 use secure_chat_core::{
     accept_session_as_responder_consuming_prekey, start_session_as_initiator, AccountId,
-    CipherSuite, CryptoError, DeviceId, DeviceKeyMaterial, DevicePreKeyBundle,
-    DrainReceiptsResponse, DrainRequest, DrainResponse, InitialMessage, Invite,
-    ListP2pCandidatesRequest, ObfuscationProfile, P2pCandidate, P2pCandidateDraft,
-    P2pCandidateKind, P2pCandidatesResponse, P2pDirectDatagram, P2pDirectReplayCache,
-    P2pProbeRequest, P2pProbeResponse, PlainMessage, QueuedMessage, QueuedReceipt, RatchetSession,
-    ReceiptRequest, RegisterRequest, RegisterResponse, RelayCommand, RelayCommandResponse,
-    SendRequest, TransportFrame, TransportKind, WireMessage, P2P_RENDEZVOUS_DEFAULT_PORT,
-    RELAY_QUIC_ALPN,
+    ApnsPlatform, CipherSuite, ClaimMlsKeyPackageRequest, CryptoError, DeleteApnsTokenRequest,
+    DeviceId, DeviceKeyMaterial, DevicePreKeyBundle, DrainReceiptsResponse, DrainRequest,
+    DrainResponse, GroupPlainMessage, GroupState, GroupTransportEnvelope, InitialMessage, Invite,
+    ListP2pCandidatesRequest, MlsKeyPackageResponse, ObfuscationProfile, P2pCandidate,
+    P2pCandidateDraft, P2pCandidateKind, P2pCandidatesResponse, P2pDirectDatagram,
+    P2pDirectReplayCache, P2pProbeRequest, P2pProbeResponse, PlainMessage,
+    PublishMlsKeyPackageRequest, QueuedMessage, QueuedReceipt, RatchetSession, ReceiptRequest,
+    RegisterApnsTokenRequest, RegisterApnsTokenResponse, RegisterRequest, RegisterResponse,
+    RelayCommand, RelayCommandResponse, SendRequest, TransportFrame, TransportKind, WireMessage,
+    GROUP_TRANSPORT_KIND, P2P_RENDEZVOUS_DEFAULT_PORT, RELAY_QUIC_ALPN,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -138,6 +140,81 @@ impl RelayClient {
                 .await?
             {
                 RelayCommandResponse::ListP2pCandidates(response) => Ok(response.candidates),
+                response => Err(unexpected_response(response)),
+            },
+        }
+    }
+
+    pub async fn register_apns_token(
+        &self,
+        keys: &DeviceKeyMaterial,
+        token: impl Into<String>,
+        platform: ApnsPlatform,
+    ) -> Result<RegisterApnsTokenResponse, ClientError> {
+        let request = signed_register_apns_token_request(keys, token.into(), platform)?;
+        match &self.transport {
+            RelayTransport::Http(client) => client.register_apns_token(request).await,
+            RelayTransport::Quic(client) => match client
+                .command(RelayCommand::RegisterApnsToken(request))
+                .await?
+            {
+                RelayCommandResponse::RegisterApnsToken(response) => Ok(response),
+                response => Err(unexpected_response(response)),
+            },
+        }
+    }
+
+    pub async fn delete_apns_token(
+        &self,
+        keys: &DeviceKeyMaterial,
+        token: Option<String>,
+    ) -> Result<RegisterApnsTokenResponse, ClientError> {
+        let request = signed_delete_apns_token_request(keys, token)?;
+        match &self.transport {
+            RelayTransport::Http(client) => client.delete_apns_token(request).await,
+            RelayTransport::Quic(client) => match client
+                .command(RelayCommand::DeleteApnsToken(request))
+                .await?
+            {
+                RelayCommandResponse::DeleteApnsToken(response) => Ok(response),
+                response => Err(unexpected_response(response)),
+            },
+        }
+    }
+
+    pub async fn publish_mls_key_package(
+        &self,
+        keys: &DeviceKeyMaterial,
+        key_package: Vec<u8>,
+    ) -> Result<MlsKeyPackageResponse, ClientError> {
+        let request = signed_publish_mls_key_package_request(keys, key_package)?;
+        match &self.transport {
+            RelayTransport::Http(client) => client.publish_mls_key_package(request).await,
+            RelayTransport::Quic(client) => match client
+                .command(RelayCommand::PublishMlsKeyPackage(request))
+                .await?
+            {
+                RelayCommandResponse::PublishMlsKeyPackage(response) => Ok(response),
+                response => Err(unexpected_response(response)),
+            },
+        }
+    }
+
+    pub async fn claim_mls_key_package(
+        &self,
+        keys: &DeviceKeyMaterial,
+        target_account_id: AccountId,
+        target_device_id: DeviceId,
+    ) -> Result<MlsKeyPackageResponse, ClientError> {
+        let request =
+            signed_claim_mls_key_package_request(keys, target_account_id, target_device_id)?;
+        match &self.transport {
+            RelayTransport::Http(client) => client.claim_mls_key_package(request).await,
+            RelayTransport::Quic(client) => match client
+                .command(RelayCommand::ClaimMlsKeyPackage(request))
+                .await?
+            {
+                RelayCommandResponse::ClaimMlsKeyPackage(response) => Ok(response),
                 response => Err(unexpected_response(response)),
             },
         }
@@ -315,6 +392,70 @@ impl RelayHttpClient {
         Ok(response.candidates)
     }
 
+    pub async fn register_apns_token(
+        &self,
+        request: RegisterApnsTokenRequest,
+    ) -> Result<RegisterApnsTokenResponse, ClientError> {
+        self.ensure_allowed()?;
+        Ok(self
+            .http
+            .post(self.url("/v1/push/apns/token"))
+            .json(&request)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn delete_apns_token(
+        &self,
+        request: DeleteApnsTokenRequest,
+    ) -> Result<RegisterApnsTokenResponse, ClientError> {
+        self.ensure_allowed()?;
+        Ok(self
+            .http
+            .post(self.url("/v1/push/apns/token/delete"))
+            .json(&request)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn publish_mls_key_package(
+        &self,
+        request: PublishMlsKeyPackageRequest,
+    ) -> Result<MlsKeyPackageResponse, ClientError> {
+        self.ensure_allowed()?;
+        Ok(self
+            .http
+            .post(self.url("/v1/mls/key-packages"))
+            .json(&request)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn claim_mls_key_package(
+        &self,
+        request: ClaimMlsKeyPackageRequest,
+    ) -> Result<MlsKeyPackageResponse, ClientError> {
+        self.ensure_allowed()?;
+        Ok(self
+            .http
+            .post(self.url("/v1/mls/key-packages/claim"))
+            .json(&request)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
     pub async fn send_receipt(
         &self,
         request: ReceiptRequest,
@@ -391,7 +532,12 @@ impl QuicRelayClient {
         command: RelayCommand,
     ) -> Result<RelayCommandResponse, ClientError> {
         let (server_name, addr) = quic_target(&self.relay_url)?;
-        let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().map_err(|err| {
+        let local_addr = if addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let mut endpoint = quinn::Endpoint::client(local_addr.parse().map_err(|err| {
             ClientError::Transport(format!("invalid local QUIC endpoint: {err}"))
         })?)
         .map_err(|err| ClientError::Transport(err.to_string()))?;
@@ -454,6 +600,26 @@ pub struct RelaySmokeReport {
     pub alice: RelaySmokePeer,
     pub bob: RelaySmokePeer,
     pub bob_invite_uri_prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupSmokePeer {
+    pub account_id: AccountId,
+    pub device_id: DeviceId,
+    pub received: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupSmokeReport {
+    pub ok: bool,
+    pub relay: String,
+    pub relay_health: serde_json::Value,
+    pub group_id: uuid::Uuid,
+    pub epoch: u64,
+    pub apns_registered: bool,
+    pub alice: GroupSmokePeer,
+    pub bob: GroupSmokePeer,
+    pub carol: GroupSmokePeer,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -949,6 +1115,86 @@ fn signed_p2p_probe_request(keys: &DeviceKeyMaterial) -> Result<P2pProbeRequest,
     Ok(request)
 }
 
+fn signed_register_apns_token_request(
+    keys: &DeviceKeyMaterial,
+    token: String,
+    platform: ApnsPlatform,
+) -> Result<RegisterApnsTokenRequest, ClientError> {
+    let mut request = RegisterApnsTokenRequest {
+        account_id: keys.account_id,
+        device_id: keys.device_id,
+        token,
+        platform,
+        auth: None,
+    };
+    request.auth = Some(secure_chat_core::sign_relay_auth_for_request(
+        keys,
+        "register_apns_token",
+        &request,
+        now_unix(),
+    )?);
+    Ok(request)
+}
+
+fn signed_delete_apns_token_request(
+    keys: &DeviceKeyMaterial,
+    token: Option<String>,
+) -> Result<DeleteApnsTokenRequest, ClientError> {
+    let mut request = DeleteApnsTokenRequest {
+        account_id: keys.account_id,
+        device_id: keys.device_id,
+        token,
+        auth: None,
+    };
+    request.auth = Some(secure_chat_core::sign_relay_auth_for_request(
+        keys,
+        "delete_apns_token",
+        &request,
+        now_unix(),
+    )?);
+    Ok(request)
+}
+
+fn signed_publish_mls_key_package_request(
+    keys: &DeviceKeyMaterial,
+    key_package: Vec<u8>,
+) -> Result<PublishMlsKeyPackageRequest, ClientError> {
+    let mut request = PublishMlsKeyPackageRequest {
+        account_id: keys.account_id,
+        device_id: keys.device_id,
+        key_package,
+        auth: None,
+    };
+    request.auth = Some(secure_chat_core::sign_relay_auth_for_request(
+        keys,
+        "publish_mls_key_package",
+        &request,
+        now_unix(),
+    )?);
+    Ok(request)
+}
+
+fn signed_claim_mls_key_package_request(
+    keys: &DeviceKeyMaterial,
+    target_account_id: AccountId,
+    target_device_id: DeviceId,
+) -> Result<ClaimMlsKeyPackageRequest, ClientError> {
+    let mut request = ClaimMlsKeyPackageRequest {
+        requester_account_id: keys.account_id,
+        requester_device_id: keys.device_id,
+        target_account_id,
+        target_device_id,
+        auth: None,
+    };
+    request.auth = Some(secure_chat_core::sign_relay_auth_for_request(
+        keys,
+        "claim_mls_key_package",
+        &request,
+        now_unix(),
+    )?);
+    Ok(request)
+}
+
 fn signed_send_request(
     keys: &DeviceKeyMaterial,
     mut request: SendRequest,
@@ -1134,6 +1380,115 @@ pub async fn run_relay_smoke_against(relay_url: &str) -> Result<RelaySmokeReport
     })
 }
 
+pub async fn run_group_smoke() -> Result<GroupSmokeReport, ClientError> {
+    let (addr, handle) = secure_chat_relay::spawn_ephemeral().await?;
+    let relay_url = format!("http://{addr}");
+    let report = run_group_smoke_against(&relay_url).await?;
+    handle.abort();
+    Ok(report)
+}
+
+pub async fn run_group_smoke_against(relay_url: &str) -> Result<GroupSmokeReport, ClientError> {
+    let relay = RelayClient::new(relay_url);
+    let relay_health = relay.health().await?;
+    let alice = DeviceKeyMaterial::generate(16);
+    let bob = DeviceKeyMaterial::generate(16);
+    let carol = DeviceKeyMaterial::generate(16);
+    relay.register_device(&alice).await?;
+    relay.register_device(&bob).await?;
+    relay.register_device(&carol).await?;
+    let apns_registered = relay
+        .register_apns_token(&bob, "00deadbeef", ApnsPlatform::Ios)
+        .await?
+        .registered;
+    relay
+        .publish_mls_key_package(&bob, b"mock-openmls-key-package".to_vec())
+        .await?;
+    let claimed_bob_key_package = relay
+        .claim_mls_key_package(&alice, bob.account_id, bob.device_id)
+        .await?
+        .key_package;
+
+    let mut group = GroupState::create("SecureChat Smoke", "Alice", alice.public_identity())?;
+    group.add_member("Bob", bob.public_identity())?;
+    group.add_member("Carol", carol.public_identity())?;
+    let bob_group = GroupState::from_welcome(group.welcome())?;
+    let carol_group = GroupState::from_welcome(group.welcome())?;
+    let wire = group.encrypt_message(
+        &alice.public_identity(),
+        GroupPlainMessage {
+            sent_at_unix: now_unix(),
+            body: "hello MLS group".to_string(),
+        },
+    )?;
+    let payload = serde_json::to_vec(&group.transport_envelope(wire))?;
+    let frame = TransportFrame::protect(&payload, &ObfuscationProfile::websocket_fallback())?;
+    let ciphertext = serde_json::to_vec(&frame)?;
+    for member in [&bob.public_identity(), &carol.public_identity()] {
+        relay
+            .send(
+                &alice,
+                SendRequest {
+                    sender_account_id: Some(alice.account_id),
+                    sender_device_id: Some(alice.device_id),
+                    to_account_id: member.account_id,
+                    to_device_id: member.device_id,
+                    transport_kind: TransportKind::WebSocketTls,
+                    sealed_sender: None,
+                    ciphertext: ciphertext.clone(),
+                    expires_unix: Some(now_unix() + 60),
+                    auth: None,
+                },
+            )
+            .await?;
+    }
+
+    let bob_received = drain_group_plaintexts(&relay, &bob, &bob_group).await?;
+    let carol_received = drain_group_plaintexts(&relay, &carol, &carol_group).await?;
+    Ok(GroupSmokeReport {
+        ok: claimed_bob_key_package == Some(b"mock-openmls-key-package".to_vec())
+            && bob_received == vec!["hello MLS group".to_string()]
+            && carol_received == vec!["hello MLS group".to_string()],
+        relay: relay_url.to_string(),
+        relay_health,
+        group_id: group.group_id,
+        epoch: group.epoch,
+        apns_registered,
+        alice: GroupSmokePeer {
+            account_id: alice.account_id,
+            device_id: alice.device_id,
+            received: Vec::new(),
+        },
+        bob: GroupSmokePeer {
+            account_id: bob.account_id,
+            device_id: bob.device_id,
+            received: bob_received,
+        },
+        carol: GroupSmokePeer {
+            account_id: carol.account_id,
+            device_id: carol.device_id,
+            received: carol_received,
+        },
+    })
+}
+
+async fn drain_group_plaintexts(
+    relay: &RelayClient,
+    keys: &DeviceKeyMaterial,
+    group: &GroupState,
+) -> Result<Vec<String>, ClientError> {
+    let mut bodies = Vec::new();
+    for queued in relay.drain(keys).await? {
+        let frame: TransportFrame = serde_json::from_slice(&queued.ciphertext)?;
+        let envelope: GroupTransportEnvelope = serde_json::from_slice(&frame.expose()?)?;
+        if envelope.kind != GROUP_TRANSPORT_KIND {
+            continue;
+        }
+        bodies.push(group.decrypt_message(&envelope.wire)?.body);
+    }
+    Ok(bodies)
+}
+
 impl From<std::io::Error> for ClientError {
     fn from(error: std::io::Error) -> Self {
         ClientError::Serialization(serde_json::Error::io(error))
@@ -1166,19 +1521,33 @@ fn quic_target(url: &str) -> Result<(String, SocketAddr), ClientError> {
 
 fn quic_client_config() -> Result<quinn::ClientConfig, ClientError> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let roots = quic_root_cert_store()?;
+    let mut crypto = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    crypto.alpn_protocols = vec![RELAY_QUIC_ALPN.to_vec()];
+    Ok(quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
+            .map_err(|err| ClientError::Transport(err.to_string()))?,
+    )))
+}
+
+fn quic_root_cert_store() -> Result<rustls::RootCertStore, ClientError> {
     let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
     let native_certs = rustls_native_certs::load_native_certs();
-    if !native_certs.errors.is_empty() && native_certs.certs.is_empty() {
+    if native_cert_env_is_explicit()
+        && !native_certs.errors.is_empty()
+        && native_certs.certs.is_empty()
+    {
         return Err(ClientError::Transport(format!(
             "could not load native certificates: {:?}",
             native_certs.errors
         )));
     }
-    for cert in native_certs.certs {
-        roots
-            .add(cert)
-            .map_err(|err| ClientError::Transport(err.to_string()))?;
-    }
+    roots.add_parsable_certificates(native_certs.certs);
+
     if let Ok(ca_path) = std::env::var("SECURE_CHAT_QUIC_CA_CERT") {
         let mut reader = BufReader::new(
             File::open(&ca_path)
@@ -1190,14 +1559,11 @@ fn quic_client_config() -> Result<quinn::ClientConfig, ClientError> {
                 .map_err(|err| ClientError::Transport(err.to_string()))?;
         }
     }
-    let mut crypto = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    crypto.alpn_protocols = vec![RELAY_QUIC_ALPN.to_vec()];
-    Ok(quinn::ClientConfig::new(Arc::new(
-        quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
-            .map_err(|err| ClientError::Transport(err.to_string()))?,
-    )))
+    Ok(roots)
+}
+
+fn native_cert_env_is_explicit() -> bool {
+    std::env::var_os("SSL_CERT_FILE").is_some() || std::env::var_os("SSL_CERT_DIR").is_some()
 }
 
 #[cfg(test)]
@@ -1243,6 +1609,12 @@ mod tests {
             report.alice.received,
             vec!["hi Alice, decrypted and replied"]
         );
+    }
+
+    #[test]
+    fn quic_root_store_has_webpki_fallback() {
+        let roots = quic_root_cert_store().unwrap();
+        assert!(roots.roots.len() >= webpki_roots::TLS_SERVER_ROOTS.len());
     }
 
     #[tokio::test]

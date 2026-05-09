@@ -4,6 +4,7 @@ struct MessengerView: View {
     @EnvironmentObject private var store: SecureChatStore
     @State private var showingInvite = false
     @State private var showingAddContact = false
+    @State private var showingCreateGroup = false
     @State private var showingTemporary = false
 
     var body: some View {
@@ -36,6 +37,13 @@ struct MessengerView: View {
                 .help("Temporary connection")
 
                 Button {
+                    showingCreateGroup = true
+                } label: {
+                    Label("Group", systemImage: "person.3")
+                }
+                .help("Create group")
+
+                Button {
                     Task { await store.receiveMessages() }
                 } label: {
                     Label("Receive", systemImage: "tray.and.arrow.down")
@@ -55,6 +63,10 @@ struct MessengerView: View {
         }
         .sheet(isPresented: $showingAddContact) {
             AddContactSheet()
+                .environmentObject(store)
+        }
+        .sheet(isPresented: $showingCreateGroup) {
+            CreateGroupSheet()
                 .environmentObject(store)
         }
         .sheet(isPresented: $showingTemporary) {
@@ -90,11 +102,36 @@ private struct ContactSidebarView: View {
                     .tag(contact.id)
                 }
             }
+            Section("Groups") {
+                ForEach(store.appSnapshot?.groups ?? []) { group in
+                    Button {
+                        store.selectedGroupID = group.id
+                        store.selectedContactID = nil
+                        store.selectedTemporaryConnectionID = nil
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "person.3.fill")
+                                .foregroundStyle(.secondary)
+                                .frame(width: 18)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(group.displayName)
+                                    .lineLimit(1)
+                                Text(group.lastMessage ?? "\(group.memberCount) members")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
             Section("Temporary") {
                 ForEach(store.appSnapshot?.temporaryConnections ?? []) { connection in
                     Button {
                         store.selectedTemporaryConnectionID = connection.id
                         store.selectedContactID = nil
+                        store.selectedGroupID = nil
                     } label: {
                         HStack(spacing: 10) {
                             Image(systemName: "timer")
@@ -119,6 +156,7 @@ private struct ContactSidebarView: View {
         .onChange(of: store.selectedContactID) { _, newValue in
             if newValue != nil {
                 store.selectedTemporaryConnectionID = nil
+                store.selectedGroupID = nil
             }
         }
     }
@@ -131,6 +169,8 @@ private struct ChatConversationView: View {
     var body: some View {
         if let connection = store.selectedTemporaryConnection {
             TemporaryConversationView(connection: connection)
+        } else if let group = store.selectedGroup {
+            GroupConversationView(group: group)
         } else if let contact = store.selectedContact {
             VStack(spacing: 0) {
                 ChatHeaderView(contact: contact)
@@ -165,6 +205,68 @@ private struct ChatConversationView: View {
                 systemImage: "person.2",
                 description: Text("Copy your invite or add a friend's invite to start chatting.")
             )
+        }
+    }
+}
+
+private struct GroupConversationView: View {
+    @EnvironmentObject private var store: SecureChatStore
+    let group: AppGroup
+    @State private var draft = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                Image(systemName: "person.3.fill")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(group.displayName)
+                        .font(.headline)
+                    Text("\(group.memberCount) members")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    Task { await store.addSelectedContactToSelectedGroup() }
+                } label: {
+                    Label("Add Selected Contact", systemImage: "person.badge.plus")
+                }
+                .disabled(store.selectedContactID == nil)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            Divider()
+            ScrollView {
+                LazyVStack(spacing: 10) {
+                    ForEach(store.selectedGroupMessages) { message in
+                        VStack(alignment: message.direction == .outgoing ? .trailing : .leading, spacing: 4) {
+                            if message.direction == .incoming {
+                                Text(message.senderDisplayName)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            MessageBubble(
+                                direction: message.direction,
+                                messageBody: message.body,
+                                status: message.status,
+                                sentAtUnix: message.sentAtUnix,
+                                receivedAtUnix: message.receivedAtUnix,
+                                showsStatus: store.showMessageStatus,
+                                showsTimestamp: store.showMessageTimestamps
+                            )
+                        }
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity)
+            }
+            Divider()
+            ComposerView(draft: $draft) {
+                let body = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                draft = ""
+                Task { await store.sendGroupMessage(body) }
+            }
         }
     }
 }
@@ -502,6 +604,47 @@ private struct AddContactSheet: View {
     private func effectiveDisplayName(for preview: InvitePreview) -> String {
         let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? preview.suggestedDisplayName : trimmed
+    }
+}
+
+private struct CreateGroupSheet: View {
+    @EnvironmentObject private var store: SecureChatStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var firstContactID = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Create Group")
+                .font(.headline)
+            TextField("Group name", text: $name)
+                .textFieldStyle(.roundedBorder)
+            Picker("First member", selection: $firstContactID) {
+                Text("None").tag("")
+                ForEach(store.appSnapshot?.contacts ?? []) { contact in
+                    Text(contact.displayName).tag(contact.id)
+                }
+            }
+            HStack {
+                Button("Create") {
+                    Task {
+                        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                        await store.createGroup(displayName: trimmed)
+                        if !firstContactID.isEmpty {
+                            store.selectedContactID = firstContactID
+                            await store.addSelectedContactToSelectedGroup()
+                        }
+                        dismiss()
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Spacer()
+                Button("Cancel") { dismiss() }
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
     }
 }
 

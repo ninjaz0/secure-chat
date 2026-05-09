@@ -1,6 +1,7 @@
 use secure_chat_core::{
     accept_session_as_responder_consuming_prekey, safety_number, start_session_as_initiator,
-    CipherSuite, DeviceKeyMaterial, Invite, ObfuscationProfile, PlainMessage, TransportFrame,
+    ApnsPlatform, CipherSuite, DeviceKeyMaterial, Invite, ObfuscationProfile, PlainMessage,
+    TransportFrame,
 };
 use serde::Serialize;
 use std::ffi::{CStr, CString};
@@ -358,6 +359,136 @@ pub extern "C" fn secure_chat_app_send_message_json(
 }
 
 #[no_mangle]
+pub extern "C" fn secure_chat_app_create_group_json(
+    data_dir: *const c_char,
+    display_name: *const c_char,
+) -> *mut c_char {
+    json_to_c_string(
+        match (
+            c_arg(data_dir, "data_dir"),
+            c_arg(display_name, "display_name"),
+        ) {
+            (Ok(data_dir), Ok(display_name)) => desktop_async(|runtime| {
+                runtime
+                    .block_on(secure_chat_desktop::DesktopRuntime::create_group(
+                        data_dir,
+                        &display_name,
+                    ))
+                    .map(to_value)
+                    .unwrap_or_else(|err| error_json(err.to_string()))
+            }),
+            (data_dir, display_name) => error_json(
+                data_dir
+                    .err()
+                    .or_else(|| display_name.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn secure_chat_app_add_group_member_json(
+    data_dir: *const c_char,
+    group_id: *const c_char,
+    contact_id: *const c_char,
+) -> *mut c_char {
+    json_to_c_string(
+        match (
+            c_arg(data_dir, "data_dir"),
+            c_arg(group_id, "group_id"),
+            c_arg(contact_id, "contact_id"),
+        ) {
+            (Ok(data_dir), Ok(group_id), Ok(contact_id)) => desktop_async(|runtime| {
+                runtime
+                    .block_on(secure_chat_desktop::DesktopRuntime::add_group_member(
+                        data_dir,
+                        &group_id,
+                        &contact_id,
+                    ))
+                    .map(to_value)
+                    .unwrap_or_else(|err| error_json(err.to_string()))
+            }),
+            (data_dir, group_id, contact_id) => error_json(
+                data_dir
+                    .err()
+                    .or_else(|| group_id.err())
+                    .or_else(|| contact_id.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn secure_chat_app_send_group_message_json(
+    data_dir: *const c_char,
+    group_id: *const c_char,
+    body: *const c_char,
+) -> *mut c_char {
+    json_to_c_string(
+        match (
+            c_arg(data_dir, "data_dir"),
+            c_arg(group_id, "group_id"),
+            c_arg(body, "body"),
+        ) {
+            (Ok(data_dir), Ok(group_id), Ok(body)) => desktop_async(|runtime| {
+                runtime
+                    .block_on(secure_chat_desktop::DesktopRuntime::send_group_message(
+                        data_dir, &group_id, &body,
+                    ))
+                    .map(to_value)
+                    .unwrap_or_else(|err| error_json(err.to_string()))
+            }),
+            (data_dir, group_id, body) => error_json(
+                data_dir
+                    .err()
+                    .or_else(|| group_id.err())
+                    .or_else(|| body.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn secure_chat_app_register_push_token_json(
+    data_dir: *const c_char,
+    token: *const c_char,
+    platform: *const c_char,
+) -> *mut c_char {
+    json_to_c_string(
+        match (
+            c_arg(data_dir, "data_dir"),
+            c_arg(token, "token"),
+            c_arg(platform, "platform"),
+        ) {
+            (Ok(data_dir), Ok(token), Ok(platform)) => {
+                let platform = match platform.as_str() {
+                    "macos" => ApnsPlatform::Macos,
+                    _ => ApnsPlatform::Ios,
+                };
+                desktop_async(|runtime| {
+                    runtime
+                        .block_on(secure_chat_desktop::DesktopRuntime::register_push_token(
+                            data_dir, &token, platform,
+                        ))
+                        .map(to_value)
+                        .unwrap_or_else(|err| error_json(err.to_string()))
+                })
+            }
+            (data_dir, token, platform) => error_json(
+                data_dir
+                    .err()
+                    .or_else(|| token.err())
+                    .or_else(|| platform.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        },
+    )
+}
+
+#[no_mangle]
 pub extern "C" fn secure_chat_app_receive_json(data_dir: *const c_char) -> *mut c_char {
     json_to_c_string(match c_arg(data_dir, "data_dir") {
         Ok(data_dir) => desktop_async(|runtime| {
@@ -623,6 +754,93 @@ mod android_jni {
                 desktop_async(|runtime| {
                     runtime
                         .block_on(DesktopRuntime::send_message(data_dir, &contact_id, &body))
+                        .map(to_value)
+                        .unwrap_or_else(|err| error_json(err.to_string()))
+                })
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_createGroupJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        display_name: JString,
+    ) -> jstring {
+        let value = with_2(
+            &mut env,
+            data_dir,
+            "data_dir",
+            display_name,
+            "display_name",
+            |data_dir, display_name| {
+                desktop_async(|runtime| {
+                    runtime
+                        .block_on(DesktopRuntime::create_group(data_dir, &display_name))
+                        .map(to_value)
+                        .unwrap_or_else(|err| error_json(err.to_string()))
+                })
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_addGroupMemberJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        group_id: JString,
+        contact_id: JString,
+    ) -> jstring {
+        let value = with_3(
+            &mut env,
+            data_dir,
+            "data_dir",
+            group_id,
+            "group_id",
+            contact_id,
+            "contact_id",
+            |data_dir, group_id, contact_id| {
+                desktop_async(|runtime| {
+                    runtime
+                        .block_on(DesktopRuntime::add_group_member(
+                            data_dir,
+                            &group_id,
+                            &contact_id,
+                        ))
+                        .map(to_value)
+                        .unwrap_or_else(|err| error_json(err.to_string()))
+                })
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_sendGroupMessageJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        group_id: JString,
+        body: JString,
+    ) -> jstring {
+        let value = with_3(
+            &mut env,
+            data_dir,
+            "data_dir",
+            group_id,
+            "group_id",
+            body,
+            "body",
+            |data_dir, group_id, body| {
+                desktop_async(|runtime| {
+                    runtime
+                        .block_on(DesktopRuntime::send_group_message(
+                            data_dir, &group_id, &body,
+                        ))
                         .map(to_value)
                         .unwrap_or_else(|err| error_json(err.to_string()))
                 })

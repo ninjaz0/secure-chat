@@ -7,19 +7,21 @@ client that shares the same Rust FFI runtime and relay protocol.
 It includes:
 
 - X3DH-style asynchronous setup and a Double Ratchet message layer
+- RFC 9420/OpenMLS-oriented group state, Welcome control messages, epoch
+  rotation, encrypted group fan-out, and relay MLS KeyPackage publish/claim APIs
 - anonymous accounts, per-device identity keys, invite links, and safety numbers
 - ChaCha20-Poly1305 message encryption by default, with an AES-256-GCM suite enum
 - HTTPS and QUIC relay transports with a shared encrypted-frame API
 - Ed25519-signed relay requests for device registration, send, drain, and read
-  receipt commands
+  receipt commands, plus private MLS and APNs push commands
 - SQLite relay persistence for public pre-key bundles, offline ciphertext queues,
-  and delivery/read receipts
+  delivery/read receipts, MLS KeyPackages, and APNs device tokens
 - macOS Keychain storage for identity keys and a local storage key
 - SQLite desktop storage for contacts, encrypted ratchet sessions, encrypted
   message bodies, and cached relay ciphertext
 - SwiftUI login, contacts, invite import/copy, chat transcript, relay settings,
-  background polling, notifications, and sent/delivered/read state display on
-  macOS and iOS
+  group chats, background polling, APNs registration, notifications, and
+  sent/delivered/read state display on macOS and iOS
 
 This is a production-deployable prototype, not audited security software. Do not
 market it as "absolutely secure" before an external cryptographic and
@@ -62,7 +64,7 @@ Create a local macOS release DMG:
 ./script/package_macos.sh
 ```
 
-The generated DMG is written to `dist/SecureChatMac-0.1.0.dmg`. It is ad-hoc
+The generated DMG is written to `dist/SecureChatMac-0.2.0.dmg`. It is ad-hoc
 signed for local testing unless you replace the signing step with a Developer ID
 certificate and notarization flow.
 
@@ -76,6 +78,13 @@ Run a local relay-backed E2EE delivery smoke:
 
 ```bash
 PATH="$HOME/.cargo/bin:$PATH" cargo run -p secure-chat-client --bin secure-chat-smoke
+```
+
+Run the group/APNs-token smoke:
+
+```bash
+SECURE_CHAT_SMOKE_MODE=group PATH="$HOME/.cargo/bin:$PATH" \
+  cargo run -p secure-chat-client --bin secure-chat-smoke
 ```
 
 Start a local HTTP relay:
@@ -95,6 +104,22 @@ SECURE_CHAT_TLS_KEY=/etc/secure-chat/tls/privkey.pem \
 SECURE_CHAT_RELAY_DB=/var/lib/secure-chat/relay.sqlite3 \
 ./script/run_relay.sh
 ```
+
+Optional Apple Push provider configuration for production relay hosts:
+
+```bash
+SECURE_CHAT_APNS_TEAM_ID=TEAMID1234 \
+SECURE_CHAT_APNS_KEY_ID=KEYID12345 \
+SECURE_CHAT_APNS_PRIVATE_KEY_PATH=/etc/secure-chat/apns/AuthKey_KEYID12345.p8 \
+SECURE_CHAT_APNS_TOPIC_IOS=com.example.securechat \
+SECURE_CHAT_APNS_TOPIC_MACOS=com.example.securechat.mac \
+SECURE_CHAT_APNS_ENV=production \
+./script/run_relay.sh
+```
+
+APNs payloads are generic: they do not include contact names, group names,
+message bodies, or ciphertext. If APNs variables are absent or APNs delivery
+fails, clients keep using polling.
 
 For server deployment and user-facing setup:
 
@@ -125,17 +150,30 @@ delivery/read receipts. Private relay operations are signed by the owning
 device, so another client cannot drain a queue just by guessing a device ID.
 Plaintext stays inside the endpoint runtimes.
 
+## Group Flow
+
+1. Create a group from the macOS, iOS, or Android client.
+2. Add member devices from existing contacts. v0.2.0 treats each device identity
+   as a separate member and does not merge multiple devices into one user.
+3. The invite/Welcome control message is sent over the existing 1:1 E2EE
+   channel, and group messages are encrypted once per group epoch then queued as
+   opaque ciphertext for each member device.
+4. The relay can publish and claim signed MLS KeyPackages through
+   `/v1/mls/key-packages` and `/v1/mls/key-packages/claim`, so the group
+   onboarding path can move to full OpenMLS Welcome exchange without changing
+   relay auth or storage boundaries.
+
 ## Architecture
 
 - `crates/secure-chat-core`: identity keys, pre-key bundles, invite links,
-  X3DH-style session setup, Double Ratchet encryption, safety numbers, relay API
-  types, and padded transport frames.
+  X3DH-style session setup, Double Ratchet encryption, OpenMLS ciphersuite-bound
+  group state, safety numbers, relay API types, and padded transport frames.
 - `crates/secure-chat-client`: HTTP(S)/QUIC relay client, in-memory secure device
   runtime, invite-based session creation, encrypted send, drain, receipt, and
   decrypt flow.
 - `crates/secure-chat-desktop`: macOS-oriented runtime with Keychain identity
   storage and SQLite persistence for contacts, encrypted sessions, encrypted
-  messages, and remote message IDs.
+  groups, encrypted messages, and remote message IDs.
 - `crates/secure-chat-relay`: Axum HTTPS relay plus Quinn QUIC relay with shared
   state, SQLite persistence, ciphertext queues, and receipt queues.
 - `crates/secure-chat-ffi`: C ABI surface consumed by the SwiftUI app.
@@ -166,16 +204,22 @@ Plaintext stays inside the endpoint runtimes.
 - Relay API auth: device Ed25519 signatures bind action, request digest,
   timestamp, nonce, account ID, and device ID; the relay rejects unsigned,
   stale, and replayed private commands.
+- Groups: v0.2.0 uses the OpenMLS RFC 9420 ciphersuite
+  `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`, persists per-device
+  group membership and epoch secrets locally, rotates the epoch when members
+  change, and sends opaque group ciphertext through per-device relay queues.
+- Push: APNs device tokens are registered with signed relay requests. The relay
+  sends only a generic "New encrypted message" notification and a refresh hint.
 
 ## Current Limits
 
-- 1:1 chat only. Group chat should use MLS later rather than stretching this
-  Double Ratchet design into large groups.
+- Group chat is per-device. v0.2.0 does not aggregate multiple devices into a
+  single user account and does not include Android FCM.
 - P2P NAT traversal has signed UDP rendezvous and direct-path probing, with
   relay fallback for restrictive NATs.
-- The macOS app uses background polling, not APNs push.
-- The iOS app currently polls while running/foregrounded. Production iOS
-  background delivery still needs APNs or PushKit-style server integration.
+- The macOS and iOS clients register for APNs, but real background delivery
+  requires Apple Developer signing, push entitlements, bundle topics, and APNs
+  provider secrets configured on the relay.
 - Real iPhone/iPad installation requires setting an Apple development team and
   bundle identifier in the iOS Xcode project.
 - The relay has durable SQLite queues, but it is not horizontally replicated.

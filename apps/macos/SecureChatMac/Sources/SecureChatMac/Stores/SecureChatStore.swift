@@ -8,6 +8,7 @@ final class SecureChatStore: ObservableObject {
     @Published private(set) var p2pProbe: P2pProbeResult?
     @Published private(set) var appSnapshot: AppSnapshot?
     @Published var selectedContactID: String?
+    @Published var selectedGroupID: String?
     @Published var selectedTemporaryConnectionID: String?
     @Published var autoReceiveEnabled: Bool {
         didSet { defaults.set(autoReceiveEnabled, forKey: PreferenceKey.autoReceiveEnabled) }
@@ -59,6 +60,15 @@ final class SecureChatStore: ObservableObject {
     var selectedMessages: [AppChatMessage] {
         guard let selectedContactID else { return [] }
         return appSnapshot?.messages.filter { $0.contactId == selectedContactID } ?? []
+    }
+
+    var selectedGroup: AppGroup? {
+        appSnapshot?.groups.first { $0.id == selectedGroupID }
+    }
+
+    var selectedGroupMessages: [AppGroupMessage] {
+        guard let selectedGroupID else { return [] }
+        return appSnapshot?.groupMessages.filter { $0.groupId == selectedGroupID } ?? []
     }
 
     var selectedTemporaryConnection: TemporaryConnection? {
@@ -181,6 +191,54 @@ final class SecureChatStore: ObservableObject {
         }
     }
 
+    func createGroup(displayName: String) async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let snapshot = try SecureChatCoreClient.createGroup(displayName: displayName)
+            apply(snapshot: snapshot)
+            selectedGroupID = snapshot.groups.first { $0.displayName == displayName }?.id ?? snapshot.groups.first?.id
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func addSelectedContactToSelectedGroup() async {
+        guard let selectedGroupID, let selectedContactID else { return }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            apply(snapshot: try SecureChatCoreClient.addGroupMember(groupID: selectedGroupID, contactID: selectedContactID))
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func sendGroupMessage(_ body: String) async {
+        guard let selectedGroupID else { return }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            apply(snapshot: try SecureChatCoreClient.sendGroupMessage(groupID: selectedGroupID, body: body))
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func registerPushToken(_ token: String, platform: String) async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            apply(snapshot: try SecureChatCoreClient.registerPushToken(token, platform: platform))
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func receiveMessages() async {
         isLoading = true
         defer { isLoading = false }
@@ -292,6 +350,9 @@ final class SecureChatStore: ObservableObject {
         appSnapshot = snapshot
         if selectedContactID == nil || !(snapshot.contacts.contains { $0.id == selectedContactID }) {
             selectedContactID = snapshot.contacts.first?.id
+        }
+        if selectedGroupID == nil || !(snapshot.groups.contains { $0.id == selectedGroupID }) {
+            selectedGroupID = snapshot.groups.first?.id
         }
         if let selectedTemporaryConnectionID,
            !(snapshot.temporaryConnections.contains { $0.id == selectedTemporaryConnectionID }) {

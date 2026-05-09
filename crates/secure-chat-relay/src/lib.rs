@@ -5,13 +5,17 @@ use axum::{Json, Router};
 use rusqlite::{params, Connection};
 use rustls_pki_types::pem::PemObject;
 use secure_chat_core::{
-    verify_relay_auth_for_request, AccountId, DeviceId, DevicePreKeyBundle, DrainReceiptsResponse,
-    DrainRequest, DrainResponse, ListP2pCandidatesRequest, P2pCandidate, P2pCandidateDraft,
-    P2pCandidateKind, P2pCandidatesResponse, P2pProbeRequest, P2pProbeResponse, QueuedMessage,
-    QueuedReceipt, ReceiptKind, ReceiptRequest, RegisterRequest, RegisterResponse, RelayAuth,
-    RelayCommand, RelayCommandResponse, SendRequest, P2P_CANDIDATE_TTL_SECS, RELAY_QUIC_ALPN,
+    verify_relay_auth_for_request, AccountId, ApnsPlatform, ClaimMlsKeyPackageRequest,
+    DeleteApnsTokenRequest, DeviceId, DevicePreKeyBundle, DrainReceiptsResponse, DrainRequest,
+    DrainResponse, ListP2pCandidatesRequest, MlsKeyPackageResponse, P2pCandidate,
+    P2pCandidateDraft, P2pCandidateKind, P2pCandidatesResponse, P2pProbeRequest, P2pProbeResponse,
+    PublishMlsKeyPackageRequest, QueuedMessage, QueuedReceipt, ReceiptKind, ReceiptRequest,
+    RegisterApnsTokenRequest, RegisterApnsTokenResponse, RegisterRequest, RegisterResponse,
+    RelayAuth, RelayCommand, RelayCommandResponse, SendRequest, P2P_CANDIDATE_TTL_SECS,
+    RELAY_QUIC_ALPN,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::env;
 use std::fs::File;
 use std::io::{self, BufReader};
 use std::net::SocketAddr;
@@ -30,6 +34,8 @@ const MAX_RECEIPTS_PER_DEVICE: usize = 2_048;
 const MAX_AUTH_NONCES_PER_DEVICE: usize = 2_048;
 const MAX_MESSAGE_CIPHERTEXT_BYTES: usize = 1024 * 1024;
 const MAX_SEALED_SENDER_BYTES: usize = 16 * 1024;
+const MAX_APNS_TOKEN_BYTES: usize = 256;
+const MAX_MLS_KEY_PACKAGE_BYTES: usize = 64 * 1024;
 const MAX_MESSAGE_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const MAX_P2P_PROBE_BYTES: usize = 4096;
 
@@ -46,6 +52,8 @@ struct RelayState {
     receipts: HashMap<DeviceId, VecDeque<QueuedReceipt>>,
     auth_nonces: HashMap<DeviceId, VecDeque<AuthNonceRecord>>,
     p2p_candidates: HashMap<DeviceId, Vec<P2pCandidate>>,
+    mls_key_packages: HashMap<DeviceId, Vec<u8>>,
+    apns_tokens: HashMap<DeviceId, Vec<ApnsTokenRecord>>,
     peer_links: HashSet<DevicePair>,
     receipt_grants: HashMap<Uuid, ReceiptGrant>,
 }
@@ -54,6 +62,13 @@ struct RelayState {
 struct AuthNonceRecord {
     issued_unix: u64,
     nonce: [u8; 16],
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct ApnsTokenRecord {
+    token: String,
+    platform: ApnsPlatform,
+    updated_unix: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -112,6 +127,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/accounts/:account_id/devices", get(list_devices))
         .route("/v1/p2p/candidates", post(publish_p2p_candidates))
         .route("/v1/p2p/candidates/list", post(list_p2p_candidates))
+        .route("/v1/mls/key-packages", post(publish_mls_key_package))
+        .route("/v1/mls/key-packages/claim", post(claim_mls_key_package))
+        .route("/v1/push/apns/token", post(register_apns_token))
+        .route("/v1/push/apns/token/delete", post(delete_apns_token))
         .route("/v1/messages", post(send_message))
         .route("/v1/messages/drain", post(drain_messages))
         .route("/v1/receipts", post(send_receipt))
@@ -274,6 +293,30 @@ pub async fn handle_command(state: AppState, command: RelayCommand) -> RelayComm
                 Err(status) => error_response(status, "list p2p candidates failed"),
             }
         }
+        RelayCommand::PublishMlsKeyPackage(request) => {
+            match publish_mls_key_package_inner(&state, request).await {
+                Ok(response) => RelayCommandResponse::PublishMlsKeyPackage(response),
+                Err(status) => error_response(status, "publish mls key package failed"),
+            }
+        }
+        RelayCommand::ClaimMlsKeyPackage(request) => {
+            match claim_mls_key_package_inner(&state, request).await {
+                Ok(response) => RelayCommandResponse::ClaimMlsKeyPackage(response),
+                Err(status) => error_response(status, "claim mls key package failed"),
+            }
+        }
+        RelayCommand::RegisterApnsToken(request) => {
+            match register_apns_token_inner(&state, request).await {
+                Ok(response) => RelayCommandResponse::RegisterApnsToken(response),
+                Err(status) => error_response(status, "register apns token failed"),
+            }
+        }
+        RelayCommand::DeleteApnsToken(request) => {
+            match delete_apns_token_inner(&state, request).await {
+                Ok(response) => RelayCommandResponse::DeleteApnsToken(response),
+                Err(status) => error_response(status, "delete apns token failed"),
+            }
+        }
         RelayCommand::SendMessage(request) => match send_message_inner(&state, request).await {
             Ok(message) => RelayCommandResponse::SendMessage(message),
             Err(status) => error_response(status, "send message failed"),
@@ -305,8 +348,147 @@ fn health_value() -> serde_json::Value {
         "transports": ["http", "https", "quic"],
         "p2p_rendezvous": "signed_udp_observed_address",
         "receipts": ["delivered", "read"],
+        "push": {
+            "apns": apns_config().is_some(),
+            "payload": "generic_no_plaintext"
+        },
         "device_auth": "ed25519_request_signatures",
     })
+}
+
+#[derive(Clone)]
+struct ApnsConfig {
+    team_id: String,
+    key_id: String,
+    private_key_pem: Vec<u8>,
+    topic_ios: Option<String>,
+    topic_macos: Option<String>,
+    environment: ApnsEnvironment,
+}
+
+#[derive(Clone, Copy)]
+enum ApnsEnvironment {
+    Sandbox,
+    Production,
+}
+
+#[derive(serde::Serialize)]
+struct ApnsJwtClaims {
+    iss: String,
+    iat: u64,
+}
+
+fn apns_config() -> Option<ApnsConfig> {
+    let team_id = env::var("SECURE_CHAT_APNS_TEAM_ID").ok()?;
+    let key_id = env::var("SECURE_CHAT_APNS_KEY_ID").ok()?;
+    let private_key_path = env::var("SECURE_CHAT_APNS_PRIVATE_KEY_PATH").ok()?;
+    let private_key_pem = match std::fs::read(private_key_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::warn!(%err, "APNs private key is not readable; push disabled");
+            return None;
+        }
+    };
+    let environment = match env::var("SECURE_CHAT_APNS_ENV")
+        .unwrap_or_else(|_| "sandbox".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "production" | "prod" => ApnsEnvironment::Production,
+        _ => ApnsEnvironment::Sandbox,
+    };
+    Some(ApnsConfig {
+        team_id,
+        key_id,
+        private_key_pem,
+        topic_ios: env::var("SECURE_CHAT_APNS_TOPIC_IOS").ok(),
+        topic_macos: env::var("SECURE_CHAT_APNS_TOPIC_MACOS").ok(),
+        environment,
+    })
+}
+
+async fn send_apns_notifications(targets: Vec<ApnsTokenRecord>) {
+    if targets.is_empty() {
+        return;
+    }
+    let Some(config) = apns_config() else {
+        return;
+    };
+    let jwt = match apns_jwt(&config) {
+        Ok(jwt) => jwt,
+        Err(err) => {
+            tracing::warn!(%err, "APNs JWT creation failed; push skipped");
+            return;
+        }
+    };
+    let client = reqwest::Client::new();
+    for target in targets {
+        let Some(topic) = apns_topic(&config, target.platform) else {
+            tracing::warn!(
+                platform = target.platform.as_str(),
+                "APNs topic is not configured; push skipped"
+            );
+            continue;
+        };
+        let url = format!(
+            "{}/3/device/{}",
+            apns_base_url(config.environment),
+            target.token
+        );
+        let payload = serde_json::json!({
+            "aps": {
+                "alert": "New encrypted message",
+                "sound": "default",
+                "content-available": 1
+            },
+            "secureChatRefresh": true
+        });
+        let result = client
+            .post(url)
+            .bearer_auth(&jwt)
+            .header("apns-topic", topic)
+            .header("apns-push-type", "alert")
+            .header("apns-priority", "10")
+            .json(&payload)
+            .send()
+            .await;
+        match result {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => {
+                tracing::warn!(status = %response.status(), "APNs send failed");
+            }
+            Err(err) => {
+                tracing::warn!(%err, "APNs send failed");
+            }
+        }
+    }
+}
+
+fn apns_jwt(config: &ApnsConfig) -> Result<String, jsonwebtoken::errors::Error> {
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+    header.kid = Some(config.key_id.clone());
+    jsonwebtoken::encode(
+        &header,
+        &ApnsJwtClaims {
+            iss: config.team_id.clone(),
+            iat: now_unix(),
+        },
+        &jsonwebtoken::EncodingKey::from_ec_pem(&config.private_key_pem)?,
+    )
+}
+
+fn apns_topic(config: &ApnsConfig, platform: ApnsPlatform) -> Option<&str> {
+    match platform {
+        ApnsPlatform::Ios => config.topic_ios.as_deref(),
+        ApnsPlatform::Macos => config.topic_macos.as_deref(),
+    }
+}
+
+fn apns_base_url(environment: ApnsEnvironment) -> &'static str {
+    match environment {
+        ApnsEnvironment::Sandbox => "https://api.sandbox.push.apple.com",
+        ApnsEnvironment::Production => "https://api.push.apple.com",
+    }
 }
 
 async fn register_device(
@@ -379,6 +561,192 @@ async fn list_devices_inner(
         .cloned()
         .collect();
     Ok(devices)
+}
+
+async fn register_apns_token(
+    State(state): State<AppState>,
+    Json(request): Json<RegisterApnsTokenRequest>,
+) -> Result<Json<RegisterApnsTokenResponse>, StatusCode> {
+    register_apns_token_inner(&state, request).await.map(Json)
+}
+
+async fn register_apns_token_inner(
+    state: &AppState,
+    request: RegisterApnsTokenRequest,
+) -> Result<RegisterApnsTokenResponse, StatusCode> {
+    let token = request.token.trim();
+    if token.is_empty() || token.len() > MAX_APNS_TOKEN_BYTES {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut inner = state.inner.write().await;
+    let mut signed_request = request.clone();
+    signed_request.auth = None;
+    let device_public = device_signing_public(&inner, request.account_id, request.device_id)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    verify_relay_auth(
+        &mut inner,
+        request.account_id,
+        request.device_id,
+        &device_public,
+        "register_apns_token",
+        &signed_request,
+        request.auth.as_ref(),
+    )?;
+    let record = ApnsTokenRecord {
+        token: token.to_string(),
+        platform: request.platform,
+        updated_unix: now_unix(),
+    };
+    let records = inner.apns_tokens.entry(request.device_id).or_default();
+    records.retain(|existing| existing.token != record.token);
+    records.push(record.clone());
+    persist_apns_token(state.db_path(), request.device_id, &record).map_err(|err| {
+        tracing::error!(%err, "persist APNs token failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(RegisterApnsTokenResponse { registered: true })
+}
+
+async fn delete_apns_token(
+    State(state): State<AppState>,
+    Json(request): Json<DeleteApnsTokenRequest>,
+) -> Result<Json<RegisterApnsTokenResponse>, StatusCode> {
+    delete_apns_token_inner(&state, request).await.map(Json)
+}
+
+async fn delete_apns_token_inner(
+    state: &AppState,
+    request: DeleteApnsTokenRequest,
+) -> Result<RegisterApnsTokenResponse, StatusCode> {
+    let mut inner = state.inner.write().await;
+    let mut signed_request = request.clone();
+    signed_request.auth = None;
+    let device_public = device_signing_public(&inner, request.account_id, request.device_id)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    verify_relay_auth(
+        &mut inner,
+        request.account_id,
+        request.device_id,
+        &device_public,
+        "delete_apns_token",
+        &signed_request,
+        request.auth.as_ref(),
+    )?;
+    if let Some(token) = request.token.as_deref() {
+        if let Some(records) = inner.apns_tokens.get_mut(&request.device_id) {
+            records.retain(|record| record.token != token);
+        }
+        delete_apns_token_from_db(state.db_path(), request.device_id, Some(token)).map_err(
+            |err| {
+                tracing::error!(%err, "delete APNs token failed");
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
+        )?;
+    } else {
+        inner.apns_tokens.remove(&request.device_id);
+        delete_apns_token_from_db(state.db_path(), request.device_id, None).map_err(|err| {
+            tracing::error!(%err, "delete APNs tokens failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    }
+    Ok(RegisterApnsTokenResponse { registered: false })
+}
+
+async fn publish_mls_key_package(
+    State(state): State<AppState>,
+    Json(request): Json<PublishMlsKeyPackageRequest>,
+) -> Result<Json<MlsKeyPackageResponse>, StatusCode> {
+    publish_mls_key_package_inner(&state, request)
+        .await
+        .map(Json)
+}
+
+async fn publish_mls_key_package_inner(
+    state: &AppState,
+    request: PublishMlsKeyPackageRequest,
+) -> Result<MlsKeyPackageResponse, StatusCode> {
+    if request.key_package.is_empty() || request.key_package.len() > MAX_MLS_KEY_PACKAGE_BYTES {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut inner = state.inner.write().await;
+    let mut signed_request = request.clone();
+    signed_request.auth = None;
+    let device_public = device_signing_public(&inner, request.account_id, request.device_id)
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    verify_relay_auth(
+        &mut inner,
+        request.account_id,
+        request.device_id,
+        &device_public,
+        "publish_mls_key_package",
+        &signed_request,
+        request.auth.as_ref(),
+    )?;
+    persist_mls_key_package(state.db_path(), request.device_id, &request.key_package).map_err(
+        |err| {
+            tracing::error!(%err, "persist MLS KeyPackage failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        },
+    )?;
+    inner
+        .mls_key_packages
+        .insert(request.device_id, request.key_package.clone());
+    Ok(MlsKeyPackageResponse {
+        account_id: request.account_id,
+        device_id: request.device_id,
+        key_package: Some(request.key_package),
+    })
+}
+
+async fn claim_mls_key_package(
+    State(state): State<AppState>,
+    Json(request): Json<ClaimMlsKeyPackageRequest>,
+) -> Result<Json<MlsKeyPackageResponse>, StatusCode> {
+    claim_mls_key_package_inner(&state, request).await.map(Json)
+}
+
+async fn claim_mls_key_package_inner(
+    state: &AppState,
+    request: ClaimMlsKeyPackageRequest,
+) -> Result<MlsKeyPackageResponse, StatusCode> {
+    let mut inner = state.inner.write().await;
+    let mut signed_request = request.clone();
+    signed_request.auth = None;
+    let device_public = device_signing_public(
+        &inner,
+        request.requester_account_id,
+        request.requester_device_id,
+    )
+    .ok_or(StatusCode::UNAUTHORIZED)?;
+    verify_relay_auth(
+        &mut inner,
+        request.requester_account_id,
+        request.requester_device_id,
+        &device_public,
+        "claim_mls_key_package",
+        &signed_request,
+        request.auth.as_ref(),
+    )?;
+    let exists = inner
+        .devices
+        .get(&request.target_account_id)
+        .and_then(|devices| devices.get(&request.target_device_id))
+        .is_some();
+    if !exists {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let key_package = inner.mls_key_packages.remove(&request.target_device_id);
+    if key_package.is_some() {
+        delete_mls_key_package(state.db_path(), request.target_device_id).map_err(|err| {
+            tracing::error!(%err, "delete claimed MLS KeyPackage failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    }
+    Ok(MlsKeyPackageResponse {
+        account_id: request.target_account_id,
+        device_id: request.target_device_id,
+        key_package,
+    })
 }
 
 async fn publish_p2p_candidates(
@@ -587,6 +955,13 @@ async fn send_message_inner(
     inner
         .peer_links
         .insert(DevicePair::new(sender_device_id, request.to_device_id));
+    let push_targets = inner
+        .apns_tokens
+        .get(&request.to_device_id)
+        .cloned()
+        .unwrap_or_default();
+    drop(inner);
+    send_apns_notifications(push_targets).await;
     Ok(message)
 }
 
@@ -1025,6 +1400,19 @@ fn init_relay_db(path: &Path) -> rusqlite::Result<()> {
             PRIMARY KEY(device_id, addr)
         );
         CREATE INDEX IF NOT EXISTS idx_p2p_candidates_device ON p2p_candidates(device_id, expires_unix);
+        CREATE TABLE IF NOT EXISTS mls_key_packages (
+            device_id TEXT NOT NULL PRIMARY KEY,
+            key_package BLOB NOT NULL,
+            updated_unix INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS apns_tokens (
+            device_id TEXT NOT NULL,
+            token TEXT NOT NULL,
+            token_json TEXT NOT NULL,
+            updated_unix INTEGER NOT NULL,
+            PRIMARY KEY(device_id, token)
+        );
+        CREATE INDEX IF NOT EXISTS idx_apns_tokens_device ON apns_tokens(device_id, updated_unix);
         CREATE TABLE IF NOT EXISTS peer_links (
             left_device_id TEXT NOT NULL,
             right_device_id TEXT NOT NULL,
@@ -1120,6 +1508,30 @@ fn load_relay_state(path: &Path) -> rusqlite::Result<RelayState> {
             .entry(device_id)
             .or_default()
             .push(candidate);
+    }
+
+    let mut mls_key_packages =
+        conn.prepare("SELECT device_id, key_package FROM mls_key_packages")?;
+    let rows = mls_key_packages.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    for row in rows {
+        let (device_id, key_package) = row?;
+        state
+            .mls_key_packages
+            .insert(parse_uuid(&device_id)?, key_package);
+    }
+
+    let mut apns_tokens =
+        conn.prepare("SELECT device_id, token_json FROM apns_tokens ORDER BY updated_unix ASC")?;
+    let rows = apns_tokens.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (device_id, json) = row?;
+        let device_id = parse_uuid(&device_id)?;
+        let record: ApnsTokenRecord = parse_json(&json)?;
+        state.apns_tokens.entry(device_id).or_default().push(record);
     }
 
     let mut peer_links = conn.prepare("SELECT left_device_id, right_device_id FROM peer_links")?;
@@ -1247,6 +1659,86 @@ fn persist_p2p_candidates(
         )?;
     }
     tx.commit()?;
+    Ok(())
+}
+
+fn persist_apns_token(
+    db_path: Option<&Path>,
+    device_id: DeviceId,
+    record: &ApnsTokenRecord,
+) -> rusqlite::Result<()> {
+    let Some(path) = db_path else {
+        return Ok(());
+    };
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "INSERT INTO apns_tokens(device_id, token, token_json, updated_unix)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(device_id, token) DO UPDATE SET
+            token_json = excluded.token_json,
+            updated_unix = excluded.updated_unix",
+        params![
+            device_id.to_string(),
+            record.token,
+            to_json(record)?,
+            record.updated_unix as i64
+        ],
+    )?;
+    Ok(())
+}
+
+fn persist_mls_key_package(
+    db_path: Option<&Path>,
+    device_id: DeviceId,
+    key_package: &[u8],
+) -> rusqlite::Result<()> {
+    let Some(path) = db_path else {
+        return Ok(());
+    };
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "INSERT INTO mls_key_packages(device_id, key_package, updated_unix)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(device_id) DO UPDATE SET
+            key_package = excluded.key_package,
+            updated_unix = excluded.updated_unix",
+        params![device_id.to_string(), key_package, now_unix() as i64],
+    )?;
+    Ok(())
+}
+
+fn delete_mls_key_package(db_path: Option<&Path>, device_id: DeviceId) -> rusqlite::Result<()> {
+    let Some(path) = db_path else {
+        return Ok(());
+    };
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "DELETE FROM mls_key_packages WHERE device_id = ?1",
+        params![device_id.to_string()],
+    )?;
+    Ok(())
+}
+
+fn delete_apns_token_from_db(
+    db_path: Option<&Path>,
+    device_id: DeviceId,
+    token: Option<&str>,
+) -> rusqlite::Result<()> {
+    let Some(path) = db_path else {
+        return Ok(());
+    };
+    let conn = Connection::open(path)?;
+    if let Some(token) = token {
+        conn.execute(
+            "DELETE FROM apns_tokens WHERE device_id = ?1 AND token = ?2",
+            params![device_id.to_string(), token],
+        )?;
+    } else {
+        conn.execute(
+            "DELETE FROM apns_tokens WHERE device_id = ?1",
+            params![device_id.to_string()],
+        )?;
+    }
     Ok(())
 }
 
@@ -1690,6 +2182,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apns_tokens_require_signed_registered_device_and_can_be_deleted() {
+        let keys = DeviceKeyMaterial::generate(1);
+        let state = AppState::memory();
+        register_device_inner(&state, signed_register(&keys))
+            .await
+            .unwrap();
+
+        let unsigned = RegisterApnsTokenRequest {
+            account_id: keys.account_id,
+            device_id: keys.device_id,
+            token: "abcd".to_string(),
+            platform: ApnsPlatform::Ios,
+            auth: None,
+        };
+        assert_eq!(
+            register_apns_token_inner(&state, unsigned)
+                .await
+                .unwrap_err(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        register_apns_token_inner(&state, signed_register_apns(&keys, "abcd"))
+            .await
+            .unwrap();
+        {
+            let inner = state.inner.read().await;
+            assert_eq!(inner.apns_tokens[&keys.device_id].len(), 1);
+        }
+        delete_apns_token_inner(&state, signed_delete_apns(&keys, None))
+            .await
+            .unwrap();
+        let inner = state.inner.read().await;
+        assert!(!inner.apns_tokens.contains_key(&keys.device_id));
+    }
+
+    #[tokio::test]
     async fn relay_rejects_device_id_collision_across_accounts() {
         let alice = DeviceKeyMaterial::generate(1);
         let mut attacker = DeviceKeyMaterial::generate(1);
@@ -1820,6 +2348,48 @@ mod tests {
             secure_chat_core::sign_relay_auth_for_request(
                 requester,
                 "list_p2p_candidates",
+                &request,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        request
+    }
+
+    fn signed_register_apns(keys: &DeviceKeyMaterial, token: &str) -> RegisterApnsTokenRequest {
+        let mut request = RegisterApnsTokenRequest {
+            account_id: keys.account_id,
+            device_id: keys.device_id,
+            token: token.to_string(),
+            platform: ApnsPlatform::Ios,
+            auth: None,
+        };
+        request.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                keys,
+                "register_apns_token",
+                &request,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        request
+    }
+
+    fn signed_delete_apns(
+        keys: &DeviceKeyMaterial,
+        token: Option<String>,
+    ) -> DeleteApnsTokenRequest {
+        let mut request = DeleteApnsTokenRequest {
+            account_id: keys.account_id,
+            device_id: keys.device_id,
+            token,
+            auth: None,
+        };
+        request.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                keys,
+                "delete_apns_token",
                 &request,
                 now_unix(),
             )

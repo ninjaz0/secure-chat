@@ -42,6 +42,15 @@ class SecureChatCoreClient(context: Context) {
     fun sendMessage(contactId: String, body: String): AppSnapshot =
         decode(SecureChatNative.sendMessageJson(dataDir, contactId, body))
 
+    fun createGroup(displayName: String): AppSnapshot =
+        decode(SecureChatNative.createGroupJson(dataDir, displayName))
+
+    fun addGroupMember(groupId: String, contactId: String): AppSnapshot =
+        decode(SecureChatNative.addGroupMemberJson(dataDir, groupId, contactId))
+
+    fun sendGroupMessage(groupId: String, body: String): AppSnapshot =
+        decode(SecureChatNative.sendGroupMessageJson(dataDir, groupId, body))
+
     fun sendTemporaryMessage(connectionId: String, body: String): AppSnapshot =
         decode(SecureChatNative.sendTemporaryMessageJson(dataDir, connectionId, body))
 
