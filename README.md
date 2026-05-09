@@ -1,114 +1,150 @@
 # SecureChat
 
-SecureChat is a self-hosted E2EE chat prototype with a Rust security core, a
-Rust relay, a native macOS SwiftUI desktop client, and a native iOS SwiftUI
-client that shares the same Rust FFI runtime and relay protocol.
+SecureChat 是一个可自托管的端到端加密聊天原型。项目包含 Rust 安全核心、
+Rust relay 服务器、原生 macOS SwiftUI 客户端、原生 iOS SwiftUI 客户端和
+原生 Android 客户端；各端通过同一套 Rust FFI 运行时和 relay 协议互通。
 
-It includes:
+当前项目已经可以用于自测和小范围试用，但它仍是“可部署原型”，不是经过第三
+方密码学审计的安全通信产品。不要在外部审计前把它宣传为“绝对安全”。
 
-- X3DH-style asynchronous setup and a Double Ratchet message layer
-- RFC 9420/OpenMLS-oriented group state, Welcome control messages, epoch
-  rotation, encrypted group fan-out, and relay MLS KeyPackage publish/claim APIs
-- anonymous accounts, per-device identity keys, invite links, and safety numbers
-- ChaCha20-Poly1305 message encryption by default, with an AES-256-GCM suite enum
-- HTTPS and QUIC relay transports with a shared encrypted-frame API
-- Ed25519-signed relay requests for device registration, send, drain, and read
-  receipt commands, plus private MLS and APNs push commands
-- SQLite relay persistence for public pre-key bundles, offline ciphertext queues,
-  delivery/read receipts, MLS KeyPackages, and APNs device tokens
-- macOS Keychain storage for identity keys and a local storage key
-- SQLite desktop storage for contacts, encrypted ratchet sessions, encrypted
-  message bodies, and cached relay ciphertext
-- SwiftUI login, contacts, invite import/copy, chat transcript, relay settings,
-  group chats, background polling, APNs registration, notifications, and
-  sent/delivered/read state display on macOS and iOS
+## 主要能力
 
-This is a production-deployable prototype, not audited security software. Do not
-market it as "absolutely secure" before an external cryptographic and
-implementation review.
+- X3DH-style 异步建联和 Double Ratchet 消息层。
+- OpenMLS/RFC 9420 ciphersuite-oriented 群聊原型：Welcome 控制消息、
+  epoch 轮换、群消息加密 fan-out、relay MLS KeyPackage 发布和领取 API。
+- 匿名账号、每设备身份密钥、邀请链接、安全码。
+- 默认使用 ChaCha20-Poly1305 消息加密，并保留 AES-256-GCM suite enum。
+- HTTPS 与 QUIC relay 传输，共用同一套加密 frame API。
+- 设备注册、发送、拉取、送达/已读回执、MLS 私有操作和 APNs push 操作都使用
+  Ed25519 relay request signature。
+- relay 使用 SQLite 持久化公开 pre-key bundle、离线密文队列、回执、
+  MLS KeyPackage 和 APNs device token。
+- macOS/iOS 使用 Apple Keychain 保存身份密钥和本地存储密钥。
+- Android 使用 app-private no-backup 存储，并排除 Android cloud backup 和
+  device-transfer extraction。
+- 本地 SQLite 保存联系人、加密 ratchet session、加密消息正文和缓存的 relay
+  密文。
+- macOS、iOS、Android 客户端支持登录、联系人、邀请导入/复制、聊天记录、
+  relay 设置、群聊、后台轮询、通知和 sent/delivered/read 状态展示。
 
-## Build And Run
+## 快速构建
 
-Build and launch the macOS app:
+构建并启动 macOS 客户端：
 
 ```bash
 ./script/build_and_run.sh --verify
 ```
 
-Build without launching, useful for CI:
+只构建不启动，适合 CI 或快速检查：
 
 ```bash
 ./script/build_and_run.sh --build-only
 ```
 
-Build the iOS simulator client and package the Rust FFI static library as an
-XCFramework:
+构建 iOS 模拟器客户端，并把 Rust FFI 静态库打包成 XCFramework：
 
 ```bash
 ./script/build_ios.sh debug
 open apps/ios/SecureChatIOS/SecureChatIOS.xcodeproj
 ```
 
-The iOS project expects `dist/SecureChatFFI.xcframework`, which the script
-generates from the same `secure-chat-ffi` C ABI used by the macOS client.
+iOS 工程依赖 `dist/SecureChatFFI.xcframework`，该文件由脚本从
+`secure-chat-ffi` C ABI 生成，和 macOS 客户端使用的是同一个安全核心。
 
-Regenerate app icons from a 1024px source image:
+重新生成 app 图标：
 
 ```bash
 ./script/generate_app_icons.py /path/to/source-icon.png
 ```
 
-Create a local macOS release DMG:
+## 发布包构建
+
+构建本地 macOS DMG：
 
 ```bash
 ./script/package_macos.sh
 ```
 
-The generated DMG is written to `dist/SecureChatMac-0.2.4.dmg`. It is ad-hoc
-signed for local testing by default. For release gates, set
-`SECURE_CHAT_MACOS_SIGN_IDENTITY` to a Developer ID identity and
-`SECURE_CHAT_RELEASE_STRICT=1`; the script then rejects ad-hoc signing and runs
-Gatekeeper assessment.
+产物会写到 `dist/SecureChatMac-0.2.4.dmg`。默认使用 ad-hoc 签名，适合本地
+测试。正式发布时需要设置 Developer ID 身份并启用严格闸门：
 
-Build an Android release APK:
+```bash
+SECURE_CHAT_MACOS_SIGN_IDENTITY="Developer ID Application: Example Inc (TEAMID)" \
+SECURE_CHAT_RELEASE_STRICT=1 \
+./script/package_macos.sh
+```
+
+严格模式会拒绝 ad-hoc 签名，并运行 Gatekeeper assessment。真正公开发布还需
+要 Apple notarization。
+
+构建 Android release APK：
 
 ```bash
 ./script/build_android.sh release
 ```
 
-Set `SECURE_CHAT_ANDROID_KEYSTORE`,
-`SECURE_CHAT_ANDROID_KEYSTORE_PASSWORD`, `SECURE_CHAT_ANDROID_KEY_ALIAS`, and
-`SECURE_CHAT_ANDROID_KEY_PASSWORD` to produce a signed release APK. Set
-`SECURE_CHAT_REQUIRE_RELEASE_SIGNING=1` in release automation so unsigned or
-debug-signed APKs cannot be shipped. If the script has to download Gradle, it
-verifies the pinned SHA-256 checksum before unzipping it.
-
-Run the Rust test suite:
+如需生成正式签名 APK，设置以下环境变量：
 
 ```bash
-PATH="$HOME/.cargo/bin:$PATH" cargo test
+SECURE_CHAT_ANDROID_KEYSTORE=/path/to/release.keystore \
+SECURE_CHAT_ANDROID_KEYSTORE_PASSWORD=... \
+SECURE_CHAT_ANDROID_KEY_ALIAS=securechat \
+SECURE_CHAT_ANDROID_KEY_PASSWORD=... \
+./script/build_android.sh release
 ```
 
-Run a local relay-backed E2EE delivery smoke:
+发布自动化中建议额外设置：
+
+```bash
+SECURE_CHAT_REQUIRE_RELEASE_SIGNING=1
+```
+
+这样脚本会拒绝 unsigned 或 debug-signed APK。若脚本需要下载 Gradle，会先校验
+固定的 SHA-256，再解压使用。
+
+## 测试与本地验证
+
+运行 Rust 全量测试：
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" cargo test --workspace
+```
+
+运行一对一 relay E2EE smoke：
 
 ```bash
 PATH="$HOME/.cargo/bin:$PATH" cargo run -p secure-chat-client --bin secure-chat-smoke
 ```
 
-Run the group/APNs-token smoke:
+运行群聊/APNs token smoke：
 
 ```bash
 SECURE_CHAT_SMOKE_MODE=group PATH="$HOME/.cargo/bin:$PATH" \
   cargo run -p secure-chat-client --bin secure-chat-smoke
 ```
 
-Start a local HTTP relay:
+运行 P2P rendezvous smoke：
+
+```bash
+SECURE_CHAT_SMOKE_MODE=p2p PATH="$HOME/.cargo/bin:$PATH" \
+  cargo run -p secure-chat-client --bin secure-chat-smoke
+```
+
+依赖安全审计：
+
+```bash
+PATH="$HOME/.cargo/bin:$PATH" cargo audit --deny warnings
+```
+
+## 启动 relay
+
+启动本地 HTTP relay：
 
 ```bash
 ./script/run_relay.sh
 ```
 
-Start HTTPS and QUIC listeners with a certificate:
+使用证书启动 HTTPS 和 QUIC listener：
 
 ```bash
 SECURE_CHAT_RELAY_HTTP_ADDR=127.0.0.1:8787 \
@@ -120,7 +156,7 @@ SECURE_CHAT_RELAY_DB=/var/lib/secure-chat/relay.sqlite3 \
 ./script/run_relay.sh
 ```
 
-Optional Apple Push provider configuration for production relay hosts:
+生产 relay 可选 APNs provider 配置：
 
 ```bash
 SECURE_CHAT_APNS_TEAM_ID=TEAMID1234 \
@@ -132,117 +168,140 @@ SECURE_CHAT_APNS_ENV=production \
 ./script/run_relay.sh
 ```
 
-APNs payloads are generic: they do not include contact names, group names,
-message bodies, or ciphertext. If APNs variables are absent or APNs delivery
-fails, clients keep using polling.
+APNs payload 是通用提醒，不包含联系人名、群名、消息正文或密文本身。如果未配置
+APNs，或 APNs 投递失败，客户端仍会通过轮询收消息。
 
-For server deployment and user-facing setup:
+## 公网部署
 
-- One-command relay installer for Ubuntu 22.04/24.04 LTS:
-  - no domain, use the server public IP: `./deploy/install-relay.sh --email you@example.com`
-  - with a domain: `./deploy/install-relay.sh --domain chat.example.com --email you@example.com`
-- Server maintenance command after install: `chatrelay`
-- Relay installs and `chatrelay update` build with `cargo --locked` and write
-  `/etc/secure-chat/build-info.txt` with git revision, `Cargo.lock` hash,
-  binary hash, and Rust toolchain versions.
-- English relay deployment: [docs/deploy-relay.md](docs/deploy-relay.md)
+Ubuntu 22.04/24.04 LTS 推荐使用一键部署脚本。
+
+无域名时使用服务器公网 IP：
+
+```bash
+./deploy/install-relay.sh --email you@example.com
+```
+
+有域名时：
+
+```bash
+./deploy/install-relay.sh --domain chat.example.com --email you@example.com
+```
+
+安装完成后，服务器上会有维护命令：
+
+```bash
+chatrelay
+```
+
+也可以直接执行：
+
+```bash
+chatrelay status
+chatrelay logs
+chatrelay restart
+chatrelay health
+chatrelay backup
+chatrelay update
+chatrelay renew
+```
+
+relay 安装和 `chatrelay update` 都使用 `cargo --locked` 构建，并写入
+`/etc/secure-chat/build-info.txt`，记录 git revision、`Cargo.lock` hash、
+二进制 hash 和 Rust 工具链版本。
+
+更多部署和使用文档：
+
+- 英文 relay 部署指南：[docs/deploy-relay.md](docs/deploy-relay.md)
 - 中文公共服务器部署指南：[docs/zh/public-server-deployment.md](docs/zh/public-server-deployment.md)
 - 中文客户端安装与首次使用说明：[docs/zh/client-installation.md](docs/zh/client-installation.md)
 - 中文客户端使用教程：[docs/zh/usage-guide.md](docs/zh/usage-guide.md)
 - 中文 iOS 构建与互联教程：[docs/zh/ios-client.md](docs/zh/ios-client.md)
-- Production environment example: [deploy/relay.env.example](deploy/relay.env.example)
+- 生产环境变量示例：[deploy/relay.env.example](deploy/relay.env.example)
+- 安全审计报告：[docs/zh/security-audit-2026-05-09.md](docs/zh/security-audit-2026-05-09.md)
 
-## Two-User Flow
+## 两人聊天流程
 
-1. Deploy or start one relay.
-2. On every client, including macOS and iOS, set the same relay URL:
-   - `https://chat.example.com`
-   - or `quic://chat.example.com:443`
-3. User A creates an invite link from the macOS or iOS app.
-4. User B imports the invite through Add Contact on any supported platform.
-5. Compare the safety code or QR through an out-of-band trusted channel.
-6. Send messages. The app polls in the background, shows notifications, and
-   updates sent/delivered/read states from relay receipts.
+1. 部署或启动一台 relay。
+2. 每个客户端都填写同一个 Relay URL，例如 `https://chat.example.com` 或
+   `quic://chat.example.com:443`。
+3. 用户 A 在客户端里创建邀请链接。
+4. 用户 B 在 Add Contact 中导入邀请。
+5. 双方通过可信的外部渠道比对安全码或二维码。
+6. 开始发消息。客户端会后台轮询、展示通知，并根据 relay 回执更新
+   sent/delivered/read 状态。
 
-The relay receives only public pre-key bundles, opaque ciphertext frames, and
-delivery/read receipts. Private relay operations are signed by the owning
-device, so another client cannot drain a queue just by guessing a device ID.
-Plaintext stays inside the endpoint runtimes.
+relay 只接收公开 pre-key bundle、不透明密文 frame 和送达/已读回执。私有 relay
+操作都由设备签名，所以攻击者不能只靠猜测 device ID 拉取别人的队列。明文只在
+端点运行时内出现。
 
-## Group Flow
+## 群聊流程
 
-1. Create a group from the macOS, iOS, or Android client.
-2. Add member devices from existing contacts. v0.2.0 treats each device identity
-   as a separate member and does not merge multiple devices into one user.
-3. The invite/Welcome control message is sent over the existing 1:1 E2EE
-   channel, and group messages are encrypted once per group epoch then queued as
-   opaque ciphertext for each member device.
-4. The relay can publish and claim signed MLS KeyPackages through
-   `/v1/mls/key-packages` and `/v1/mls/key-packages/claim`, so the group
-   onboarding path can move to full OpenMLS Welcome exchange without changing
-   relay auth or storage boundaries.
+1. 在 macOS、iOS 或 Android 客户端创建群聊。
+2. 从已有联系人中添加成员设备。当前版本按设备身份建模，一个人的多设备不会自动
+   合并成单一用户。
+3. invite/Welcome 控制消息通过已有一对一 E2EE 通道发送。
+4. 群消息按当前 group epoch 加密，再作为不透明密文分别排入每个成员设备的
+   relay 队列。
+5. relay 支持通过 `/v1/mls/key-packages` 发布 signed MLS KeyPackage，并通过
+   `/v1/mls/key-packages/claim` 领取。领取接口要求请求者与目标设备存在关系授权，
+   避免任意注册设备消耗他人的 KeyPackage。
 
-## Architecture
+## 项目结构
 
-- `crates/secure-chat-core`: identity keys, pre-key bundles, invite links,
-  X3DH-style session setup, Double Ratchet encryption, OpenMLS ciphersuite-bound
-  group state, safety numbers, relay API types, and padded transport frames.
-- `crates/secure-chat-client`: HTTP(S)/QUIC relay client, in-memory secure device
-  runtime, invite-based session creation, encrypted send, drain, receipt, and
-  decrypt flow.
-- `crates/secure-chat-desktop`: macOS-oriented runtime with Keychain identity
-  storage and SQLite persistence for contacts, encrypted sessions, encrypted
-  groups, encrypted messages, and remote message IDs.
-- `crates/secure-chat-relay`: Axum HTTPS relay plus Quinn QUIC relay with shared
-  state, SQLite persistence, ciphertext queues, and receipt queues.
-- `crates/secure-chat-ffi`: C ABI surface consumed by the SwiftUI app.
-- `apps/macos/SecureChatMac`: native macOS SwiftUI client.
-- `apps/ios/SecureChatIOS`: native iOS SwiftUI client. It links
-  `dist/SecureChatFFI.xcframework` and uses the same JSON FFI commands,
-  SQLite schema, Apple Keychain storage, invite format, relay API, and E2EE
-  protocol as the macOS client.
+- `crates/secure-chat-core`：身份密钥、pre-key bundle、邀请链接、
+  X3DH-style session setup、Double Ratchet、OpenMLS ciphersuite-bound 群聊状态、
+  安全码、relay API 类型和 padded transport frame。
+- `crates/secure-chat-client`：HTTP(S)/QUIC relay client、内存安全设备运行时、
+  基于邀请的 session 创建、加密发送、拉取、回执和解密流程。
+- `crates/secure-chat-desktop`：面向桌面和移动 FFI 的 runtime，包含 Keychain
+  身份存储、SQLite 联系人、加密 session、加密群组、加密消息和远端消息 ID。
+- `crates/secure-chat-relay`：Axum HTTPS relay、Quinn QUIC relay、共享状态、
+  SQLite 持久化、密文队列和回执队列。
+- `crates/secure-chat-ffi`：供 SwiftUI 和 Android JNI 调用的 C ABI。
+- `apps/macos/SecureChatMac`：原生 macOS SwiftUI 客户端。
+- `apps/ios/SecureChatIOS`：原生 iOS SwiftUI 客户端，链接
+  `dist/SecureChatFFI.xcframework`。
+- `apps/android/SecureChatAndroid`：原生 Android Kotlin/Compose 客户端，通过 JNI
+  调用同一套 Rust FFI。
 
-## Protocol Snapshot
+## 协议快照
 
-- Identity: anonymous account ID plus per-device Ed25519 signing keys and X25519
-  identity keys.
-- Authentication: account signing key signs each device identity; device signing
-  key signs the current signed pre-key.
-- Session setup: X3DH-style X25519 combinations over identity key, signed
-  pre-key, ephemeral key, and optional one-time pre-key.
-- Message security: Double Ratchet using X25519 DH ratchet and HKDF-SHA256 chain
-  ratchets.
-- AEAD: ChaCha20-Poly1305 by default. AES-256-GCM remains a supported suite enum.
-- Header protection: message number and content type are AEAD-protected; ratchet
-  recovery fields remain authenticated cleartext.
-- OOB verification: safety number and QR payload are derived from both sides'
-  account/device public-key digests.
-- Transport: HTTPS and QUIC carry the same E2EE ciphertext envelopes. The core
-  also supports signed P2P UDP rendezvous, NAT candidate probing, fixed-size
-  padding, jitter profiles, and cover-traffic flags.
-- Relay API auth: device Ed25519 signatures bind action, request digest,
-  timestamp, nonce, account ID, and device ID; the relay rejects unsigned,
-  stale, and replayed private commands.
-- Groups: v0.2.0 uses the OpenMLS RFC 9420 ciphersuite
-  `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519`, persists per-device
-  group membership and epoch secrets locally, rotates the epoch when members
-  change, and sends opaque group ciphertext through per-device relay queues.
-- Push: APNs device tokens are registered with signed relay requests. The relay
-  sends only a generic "New encrypted message" notification and a refresh hint.
+- 身份：匿名 account ID，每设备 Ed25519 signing key 和 X25519 identity key。
+- 认证：account signing key 签名每个 device identity，device signing key 签名
+  当前 signed pre-key。
+- 会话建立：X3DH-style X25519 组合，覆盖 identity key、signed pre-key、ephemeral
+  key 和可选 one-time pre-key。
+- 消息安全：Double Ratchet，使用 X25519 DH ratchet 和 HKDF-SHA256 chain ratchet。
+- AEAD：默认 ChaCha20-Poly1305，保留 AES-256-GCM suite enum。
+- Header protection：消息序号和 content type 被 AEAD 保护，ratchet 恢复字段保持
+  authenticated cleartext。
+- 邀请链接：当前版本会签名完整 invite metadata，包括 mode、过期时间、relay hint
+  和 bundle transcript hash；旧版未签名邀请会被拒绝，需要重新生成。
+- OOB verification：安全码和 QR payload 由双方 account/device 公钥摘要派生。
+- Transport：HTTPS 和 QUIC 携带同一类 E2EE ciphertext envelope；核心还支持签名
+  P2P UDP rendezvous、NAT candidate probing、固定大小 padding、jitter profile 和
+  cover-traffic flag。
+- Relay auth：设备 Ed25519 签名绑定 action、request digest、timestamp、nonce、
+  account ID 和 device ID；relay 会拒绝未签名、过期和重放的私有命令。持久化 relay
+  会把 auth nonce 写入 SQLite，重启后不会重新打开时间窗口内的重放风险。
+- 群聊：当前是 OpenMLS ciphersuite-oriented group prototype，不等同于完整
+  RFC 9420 MLS state machine。群聊会持久化每设备成员和 epoch secret，成员变化时
+  轮换 epoch，并通过每设备 relay 队列发送不透明群密文。
+- Push：APNs device token 通过签名 relay 请求注册。relay 只发送通用的
+  `New encrypted message` 通知和刷新提示。
 
-## Current Limits
+## 当前限制
 
-- Group chat is per-device. v0.2.0 does not aggregate multiple devices into a
-  single user account and does not include Android FCM.
-- P2P NAT traversal has signed UDP rendezvous and direct-path probing, with
-  relay fallback for restrictive NATs.
-- The macOS and iOS clients register for APNs, but real background delivery
-  requires Apple Developer signing, push entitlements, bundle topics, and APNs
-  provider secrets configured on the relay.
-- Real iPhone/iPad installation requires setting an Apple development team and
-  bundle identifier in the iOS Xcode project.
-- The relay has durable SQLite queues, but it is not horizontally replicated.
-- Current invite links sign the full invite metadata. Older
-  unsigned invite links are rejected and should be regenerated.
-- The cryptographic design and implementation still need third-party audit
-  before public security claims.
+- 群聊仍是 per-device 模型，不会把一个人的多个设备自动聚合成单一用户。
+- 群聊层还不是完整 MLS state machine；高风险群聊场景需要后续接入真实 OpenMLS
+  credential/proposal/commit/welcome 流程。
+- Android 还没有接入 Android Keystore/StrongBox wrapping key；目前依赖
+  app-private no-backup 文件权限和本地加密。
+- P2P NAT traversal 已支持签名 UDP rendezvous 和直连探测，复杂 NAT 下会回退到
+  relay。
+- macOS 和 iOS 已有 APNs 注册路径，但真实后台推送需要 Apple Developer signing、
+  push entitlement、bundle topic 和 relay APNs provider secret。
+- 真机 iPhone/iPad 安装需要在 iOS Xcode 工程中设置 Apple development team 和
+  bundle identifier。
+- relay 有 durable SQLite 队列，但没有做水平复制。
+- 公开安全声明前仍需要第三方密码学和实现审计。
