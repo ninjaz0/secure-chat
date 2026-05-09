@@ -174,6 +174,26 @@ quic://chat.example.com:443
 Use `quic://...` for QUIC-first operation. Keep `https://...` as the fallback
 URL when testing firewalls that block UDP.
 
+If the relay log says `invalid peer certificate: UnknownIssuer`, the client
+rejected the server TLS certificate chain and then aborted the QUIC handshake.
+Check the public certificate first:
+
+```bash
+curl -v https://chat.example.com/health
+openssl s_client -connect chat.example.com:443 -servername chat.example.com -showcerts </dev/null
+```
+
+Common fixes:
+
+- If you deployed with `--staging`, issue a real certificate by rerunning the
+  installer without `--staging`.
+- Make sure `SECURE_CHAT_TLS_CERT` points to `fullchain.pem`, not only the leaf
+  `cert.pem`.
+- For a private CA or self-signed test certificate, set
+  `SECURE_CHAT_QUIC_CA_CERT=/path/to/ca.pem` when running Rust smoke tests. App
+  builds should use a publicly trusted certificate unless you intentionally ship
+  a private trust anchor.
+
 ## Certificate Renewal
 
 Install a renewal hook so Certbot copies fresh certificates and restarts the

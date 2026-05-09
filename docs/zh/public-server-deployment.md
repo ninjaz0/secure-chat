@@ -329,6 +329,27 @@ sudo ufw status
 https://chat.example.com
 ```
 
+### 日志出现 UnknownIssuer
+
+如果服务器日志里有：
+
+```text
+invalid peer certificate: UnknownIssuer
+```
+
+含义是客户端不信任服务器发出来的 TLS 证书链，然后主动中止了 QUIC 握手。先在任意可访问服务器的机器上检查公网证书：
+
+```bash
+curl -v https://chat.example.com/health
+openssl s_client -connect chat.example.com:443 -servername chat.example.com -showcerts </dev/null
+```
+
+常见修复：
+
+- 如果部署时用了 `--staging`，这是 Let's Encrypt 测试证书，普通客户端不会信任；重新不带 `--staging` 签发正式证书。
+- 确认 `/etc/secure-chat/relay.env` 里的 `SECURE_CHAT_TLS_CERT` 指向 `fullchain.pem`，不要只给 leaf `cert.pem`。
+- 如果是自签名或私有 CA 测试，Rust smoke test 可以临时加 `SECURE_CHAT_QUIC_CA_CERT=/path/to/ca.pem`。正式给 macOS/iOS/Android 客户端用，建议换成公开受信任证书。
+
 ### Certbot 签发失败
 
 确认 DNS 已生效：

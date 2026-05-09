@@ -515,6 +515,10 @@ print_done() {
   if [[ "$CERT_MODE" == "ip" && "$SKIP_CERTBOT" -eq 0 ]]; then
     printf '\nNote: IP TLS certificates are short-lived. Automatic renewal is installed with %s-cert-renew.timer.\n' "$SERVICE"
   fi
+  if [[ "$STAGING" -eq 1 ]]; then
+    printf '\nWarning: --staging issued a test certificate that normal clients do not trust.\n'
+    printf 'Re-run without --staging before using the printed HTTPS/QUIC URLs in apps.\n'
+  fi
   printf 'Run "chatrelay" to open the management menu.\n'
 }
 
