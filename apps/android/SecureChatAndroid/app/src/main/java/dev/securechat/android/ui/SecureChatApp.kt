@@ -1,26 +1,43 @@
 package dev.securechat.android.ui
 
+import android.graphics.BitmapFactory
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.EmojiEmotions
+import androidx.compose.material.icons.filled.LocalFireDepartment
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.Image as ImageIcon
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -45,18 +62,24 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import dev.securechat.android.core.AttachmentContent
 import dev.securechat.android.core.AppChatMessage
 import dev.securechat.android.core.AppContact
 import dev.securechat.android.core.AppGroup
@@ -64,12 +87,16 @@ import dev.securechat.android.core.AppGroupMessage
 import dev.securechat.android.core.AppMessageDirection
 import dev.securechat.android.core.AppMessageStatus
 import dev.securechat.android.core.InvitePreview
+import dev.securechat.android.core.MessageContent
 import dev.securechat.android.core.SecureChatUiState
 import dev.securechat.android.core.SecureChatViewModel
+import dev.securechat.android.core.StickerItem
 import dev.securechat.android.core.TemporaryConnection
 import dev.securechat.android.core.TemporaryMessage
 import java.text.DateFormat
+import java.text.NumberFormat
 import java.util.Date
+import kotlinx.coroutines.launch
 
 private enum class MainTab {
     Chats,
@@ -390,13 +417,18 @@ private fun ContactChatPanel(
     messages: List<AppChatMessage>,
 ) {
     ChatContainer(
+        viewModel = viewModel,
+        threadId = contact.id,
         title = contact.displayName,
         safetyNumber = contact.safetyNumber,
         temporary = false,
         messages = messages,
+        stickers = state.snapshot?.stickers.orEmpty(),
         showStatus = state.showMessageStatus,
         showTimestamp = state.showMessageTimestamps,
         onSend = viewModel::sendMessage,
+        onRenameContact = { viewModel.updateContactDisplayName(contact.id, it) },
+        onDeleteContact = { viewModel.deleteContact(contact.id) },
     )
 }
 
@@ -408,10 +440,13 @@ private fun GroupChatPanel(
     messages: List<AppGroupMessage>,
 ) {
     ChatContainer(
+        viewModel = viewModel,
+        threadId = group.id,
         title = group.displayName,
         safetyNumber = "${group.memberCount} MLS members",
         temporary = false,
         messages = messages,
+        stickers = state.snapshot?.stickers.orEmpty(),
         showStatus = state.showMessageStatus,
         showTimestamp = state.showMessageTimestamps,
         onSend = viewModel::sendGroupMessage,
@@ -426,10 +461,13 @@ private fun TemporaryChatPanel(
     messages: List<TemporaryMessage>,
 ) {
     ChatContainer(
+        viewModel = viewModel,
+        threadId = connection.id,
         title = connection.displayName,
         safetyNumber = connection.safetyNumber,
         temporary = true,
         messages = messages,
+        stickers = state.snapshot?.stickers.orEmpty(),
         showStatus = state.showMessageStatus,
         showTimestamp = state.showMessageTimestamps,
         onSend = viewModel::sendTemporaryMessage,
@@ -439,16 +477,86 @@ private fun TemporaryChatPanel(
 
 @Composable
 private fun <T> ChatContainer(
+    viewModel: SecureChatViewModel,
+    threadId: String,
     title: String,
     safetyNumber: String,
     temporary: Boolean,
     messages: List<T>,
+    stickers: List<StickerItem>,
     showStatus: Boolean,
     showTimestamp: Boolean,
     onSend: (String) -> Unit,
     onEndTemporary: (() -> Unit)? = null,
+    onRenameContact: ((String) -> Unit)? = null,
+    onDeleteContact: (() -> Unit)? = null,
 ) {
     var draft by rememberSaveable(title) { mutableStateOf("") }
+    var renameDraft by rememberSaveable(threadId) { mutableStateOf(title) }
+    var showRenameDialog by rememberSaveable(threadId) { mutableStateOf(false) }
+    var showDeleteDialog by rememberSaveable(threadId) { mutableStateOf(false) }
+    val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
+    val bottomThresholdPx = with(LocalDensity.current) { 80.dp.toPx() }
+    val lastMessageId = messages.lastOrNull()?.chatItemId()
+    val fileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        uri?.let { viewModel.sendAttachment(it, "file") }
+    }
+    val imageLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        uri?.let { viewModel.sendAttachment(it, "image") }
+    }
+    val stickerImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        uri?.let { viewModel.importSticker(it) }
+    }
+    var previousLastMessageId by rememberSaveable(threadId) { mutableStateOf<String?>(null) }
+    var showNewMessages by remember(threadId) { mutableStateOf(false) }
+    val isPinnedToBottom by remember(listState, bottomThresholdPx) {
+        derivedStateOf {
+            listState.isPinnedToBottom(bottomThresholdPx)
+        }
+    }
+
+    LaunchedEffect(threadId) {
+        previousLastMessageId = null
+        showNewMessages = false
+        if (messages.isNotEmpty()) {
+            listState.scrollToItem(messages.lastIndex)
+        }
+    }
+
+    LaunchedEffect(isPinnedToBottom) {
+        if (isPinnedToBottom) {
+            showNewMessages = false
+        }
+    }
+
+    LaunchedEffect(lastMessageId) {
+        val currentLastMessageId = lastMessageId
+        if (currentLastMessageId == null) {
+            previousLastMessageId = null
+            showNewMessages = false
+            return@LaunchedEffect
+        }
+
+        val previous = previousLastMessageId
+        previousLastMessageId = currentLastMessageId
+        if (previous == null) {
+            listState.scrollToItem(messages.lastIndex)
+            return@LaunchedEffect
+        }
+        if (previous == currentLastMessageId) {
+            return@LaunchedEffect
+        }
+
+        val forceScroll = messages.lastOrNull()?.chatItemDirection() == AppMessageDirection.Outgoing
+        if (isPinnedToBottom || forceScroll) {
+            listState.animateScrollToItem(messages.lastIndex)
+            showNewMessages = false
+        } else {
+            showNewMessages = true
+        }
+    }
+
     Card(shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -456,40 +564,116 @@ private fun <T> ChatContainer(
                     Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text("Safety $safetyNumber", style = MaterialTheme.typography.bodySmall, maxLines = 1)
                 }
+                if (onRenameContact != null) {
+                    IconButton(onClick = {
+                        renameDraft = title
+                        showRenameDialog = true
+                    }) {
+                        Icon(Icons.Filled.Edit, contentDescription = "Edit nickname")
+                    }
+                }
+                if (onDeleteContact != null) {
+                    IconButton(onClick = { showDeleteDialog = true }) {
+                        Icon(Icons.Filled.Delete, contentDescription = "Delete contact")
+                    }
+                }
                 if (temporary && onEndTemporary != null) {
                     OutlinedButton(onClick = onEndTemporary) { Text("End") }
                 }
             }
             HorizontalDivider()
-            messages.forEach { message ->
-                when (message) {
-                    is AppChatMessage -> MessageBubble(
-                        direction = message.direction,
-                        body = message.body,
-                        status = message.status,
-                        unix = message.receivedAtUnix ?: message.sentAtUnix,
-                        showStatus = showStatus,
-                        showTimestamp = showTimestamp,
-                    )
-                    is TemporaryMessage -> MessageBubble(
-                        direction = message.direction,
-                        body = message.body,
-                        status = message.status,
-                        unix = message.receivedAtUnix ?: message.sentAtUnix,
-                        showStatus = showStatus,
-                        showTimestamp = showTimestamp,
-                    )
-                    is AppGroupMessage -> MessageBubble(
-                        direction = message.direction,
-                        body = message.body,
-                        status = message.status,
-                        unix = message.receivedAtUnix ?: message.sentAtUnix,
-                        showStatus = showStatus,
-                        showTimestamp = showTimestamp,
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 260.dp, max = 520.dp),
+            ) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(messages, key = { it.chatItemId() }) { message ->
+                        when (message) {
+                            is AppChatMessage -> MessageBubble(
+                                messageId = message.id,
+                                direction = message.direction,
+                                body = message.body,
+                                content = message.content,
+                                status = message.status,
+                                unix = message.receivedAtUnix ?: message.sentAtUnix,
+                                showStatus = showStatus,
+                                showTimestamp = showTimestamp,
+                                onOpenBurn = viewModel::openBurnMessage,
+                            )
+                            is TemporaryMessage -> MessageBubble(
+                                messageId = message.id,
+                                direction = message.direction,
+                                body = message.body,
+                                content = message.content,
+                                status = message.status,
+                                unix = message.receivedAtUnix ?: message.sentAtUnix,
+                                showStatus = showStatus,
+                                showTimestamp = showTimestamp,
+                                onOpenBurn = viewModel::openBurnMessage,
+                            )
+                            is AppGroupMessage -> MessageBubble(
+                                messageId = message.id,
+                                direction = message.direction,
+                                body = message.body,
+                                content = message.content,
+                                status = message.status,
+                                unix = message.receivedAtUnix ?: message.sentAtUnix,
+                                showStatus = showStatus,
+                                showTimestamp = showTimestamp,
+                                onOpenBurn = viewModel::openBurnMessage,
+                            )
+                        }
+                    }
+                }
+
+                if (showNewMessages && !isPinnedToBottom) {
+                    AssistChip(
+                        onClick = {
+                            coroutineScope.launch {
+                                if (messages.isNotEmpty()) {
+                                    listState.animateScrollToItem(messages.lastIndex)
+                                }
+                                showNewMessages = false
+                            }
+                        },
+                        label = { Text("New messages") },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(8.dp),
                     )
                 }
             }
+            if (stickers.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    stickers.forEach { sticker ->
+                        AssistChip(
+                            onClick = { viewModel.sendSticker(sticker) },
+                            label = { Text(sticker.displayName, maxLines = 1) },
+                            leadingIcon = { Icon(Icons.Filled.EmojiEmotions, contentDescription = null) },
+                        )
+                    }
+                }
+            }
             Row(verticalAlignment = Alignment.Bottom) {
+                IconButton(onClick = { fileLauncher.launch(arrayOf("*/*")) }) {
+                    Icon(Icons.Filled.AttachFile, contentDescription = "Send file")
+                }
+                IconButton(onClick = { imageLauncher.launch(arrayOf("image/*")) }) {
+                    Icon(Icons.Filled.ImageIcon, contentDescription = "Send image")
+                }
+                IconButton(onClick = { stickerImportLauncher.launch(arrayOf("image/*")) }) {
+                    Icon(Icons.Filled.EmojiEmotions, contentDescription = "Import sticker")
+                }
                 OutlinedTextField(
                     value = draft,
                     onValueChange = { draft = it },
@@ -499,6 +683,16 @@ private fun <T> ChatContainer(
                     maxLines = 4,
                 )
                 Spacer(Modifier.width(8.dp))
+                IconButton(
+                    onClick = {
+                        val text = draft
+                        draft = ""
+                        viewModel.sendBurnMessage(text)
+                    },
+                    enabled = draft.isNotBlank(),
+                ) {
+                    Icon(Icons.Filled.LocalFireDepartment, contentDescription = "Send burn after reading")
+                }
                 Button(
                     onClick = {
                         val text = draft
@@ -512,18 +706,65 @@ private fun <T> ChatContainer(
             }
         }
     }
+
+    if (showRenameDialog && onRenameContact != null) {
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text("Edit Nickname") },
+            text = {
+                OutlinedTextField(
+                    value = renameDraft,
+                    onValueChange = { renameDraft = it },
+                    label = { Text("Nickname") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onRenameContact(renameDraft)
+                        showRenameDialog = false
+                    },
+                    enabled = renameDraft.isNotBlank(),
+                ) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { showRenameDialog = false }) { Text("Cancel") } },
+        )
+    }
+
+    if (showDeleteDialog && onDeleteContact != null) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text("Delete contact?") },
+            text = { Text("This deletes the local contact, 1:1 history, keys, and unfinished attachments on this device.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteContact()
+                        showDeleteDialog = false
+                    },
+                ) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { showDeleteDialog = false }) { Text("Cancel") } },
+        )
+    }
 }
 
 @Composable
 private fun MessageBubble(
+    messageId: String,
     direction: AppMessageDirection,
     body: String,
+    content: MessageContent,
     status: AppMessageStatus,
     unix: Long,
     showStatus: Boolean,
     showTimestamp: Boolean,
+    onOpenBurn: (String) -> Unit,
 ) {
     val outgoing = direction == AppMessageDirection.Outgoing
+    var showBurnDialog by rememberSaveable(messageId) { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (outgoing) Arrangement.End else Arrangement.Start) {
         Card(
             shape = RoundedCornerShape(8.dp),
@@ -533,7 +774,11 @@ private fun MessageBubble(
             modifier = Modifier.fillMaxWidth(0.82f),
         ) {
             Column(Modifier.padding(10.dp)) {
-                Text(body)
+                MessageContentView(
+                    content = content,
+                    fallbackBody = body,
+                    onOpenBurn = { showBurnDialog = true },
+                )
                 if (showStatus || showTimestamp) {
                     Text(
                         listOfNotNull(
@@ -547,7 +792,129 @@ private fun MessageBubble(
             }
         }
     }
+
+    if (showBurnDialog) {
+        AlertDialog(
+            onDismissRequest = { showBurnDialog = false },
+            title = { Text("Burn After Reading") },
+            text = { Text(content.text.orEmpty()) },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showBurnDialog = false
+                        onOpenBurn(messageId)
+                    },
+                ) { Text("Destroy") }
+            },
+        )
+    }
 }
+
+@Composable
+private fun MessageContentView(
+    content: MessageContent,
+    fallbackBody: String,
+    onOpenBurn: () -> Unit,
+) {
+    when (content.kind) {
+        "burn" -> {
+            if (content.destroyed) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Icon(Icons.Filled.LocalFireDepartment, contentDescription = null)
+                    Text("Burned message", color = MaterialTheme.colorScheme.secondary)
+                }
+            } else {
+                OutlinedButton(onClick = onOpenBurn) {
+                    Icon(Icons.Filled.LocalFireDepartment, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Open burn after reading")
+                }
+            }
+        }
+        "image", "sticker" -> ImageAttachmentView(content.attachment, compact = content.kind == "sticker")
+        "file" -> FileAttachmentView(content.attachment)
+        else -> Text(content.text ?: fallbackBody)
+    }
+}
+
+@Composable
+private fun ImageAttachmentView(attachment: AttachmentContent?, compact: Boolean) {
+    if (attachment == null) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Icon(Icons.Filled.ImageIcon, contentDescription = null)
+            Text("Image")
+        }
+        return
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        val bitmap = remember(attachment.localPath) {
+            attachment.localPath?.let { BitmapFactory.decodeFile(it) }
+        }
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = attachment.fileName,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = if (compact) 150.dp else 260.dp),
+                contentScale = ContentScale.Fit,
+            )
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Icon(Icons.Filled.ImageIcon, contentDescription = null)
+                Text(attachment.transferStatus.ifBlank { "Image" })
+            }
+        }
+        Text(attachment.fileName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+    }
+}
+
+@Composable
+private fun FileAttachmentView(attachment: AttachmentContent?) {
+    if (attachment == null) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(Icons.AutoMirrored.Filled.InsertDriveFile, contentDescription = null)
+            Text("File")
+        }
+        return
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Icon(Icons.AutoMirrored.Filled.InsertDriveFile, contentDescription = null)
+        Column(Modifier.weight(1f)) {
+            Text(attachment.fileName, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                "${attachment.sizeBytes.byteCount()} · ${attachment.transferStatus.ifBlank { "ready" }}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.secondary,
+            )
+        }
+    }
+}
+
+private fun LazyListState.isPinnedToBottom(bottomThresholdPx: Float): Boolean {
+    val totalItems = layoutInfo.totalItemsCount
+    if (totalItems == 0) return true
+    val lastVisibleItem = layoutInfo.visibleItemsInfo.lastOrNull() ?: return false
+    val distanceToBottom = layoutInfo.viewportEndOffset - (lastVisibleItem.offset + lastVisibleItem.size)
+    return lastVisibleItem.index >= totalItems - 1 && distanceToBottom >= -bottomThresholdPx
+}
+
+private fun Any?.chatItemId(): String =
+    when (this) {
+        is AppChatMessage -> id
+        is TemporaryMessage -> id
+        is AppGroupMessage -> id
+        null -> ""
+        else -> hashCode().toString()
+    }
+
+private fun Any?.chatItemDirection(): AppMessageDirection? =
+    when (this) {
+        is AppChatMessage -> direction
+        is TemporaryMessage -> direction
+        is AppGroupMessage -> direction
+        else -> null
+    }
 
 @Composable
 private fun InviteDialog(
@@ -826,3 +1193,6 @@ private fun Long.expiryText(): String {
 
 private fun Long.timeText(): String =
     DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(this * 1000))
+
+private fun Long.byteCount(): String =
+    NumberFormat.getNumberInstance().format(this) + " bytes"

@@ -36,11 +36,26 @@ class SecureChatCoreClient(context: Context) {
     fun addContact(displayName: String, inviteUri: String): AppSnapshot =
         decode(SecureChatNative.addContactJson(dataDir, displayName, inviteUri))
 
+    fun updateContactDisplayName(contactId: String, displayName: String): AppSnapshot =
+        decode(SecureChatNative.updateContactDisplayNameJson(dataDir, contactId, displayName))
+
+    fun deleteContact(contactId: String): AppSnapshot =
+        decode(SecureChatNative.deleteContactJson(dataDir, contactId))
+
     fun startTemporaryConnection(inviteUri: String): TemporaryStartResponse =
         decode(SecureChatNative.startTemporaryConnectionJson(dataDir, inviteUri))
 
     fun sendMessage(contactId: String, body: String): AppSnapshot =
         decode(SecureChatNative.sendMessageJson(dataDir, contactId, body))
+
+    fun sendAttachment(threadKind: String, threadId: String, filePath: String, kind: String): SendAttachmentResponse =
+        decode(SecureChatNative.sendAttachmentJson(dataDir, threadKind, threadId, filePath, kind))
+
+    fun sendBurnMessage(threadKind: String, threadId: String, body: String): AppSnapshot =
+        decode(SecureChatNative.sendBurnMessageJson(dataDir, threadKind, threadId, body))
+
+    fun openBurnMessage(threadKind: String, threadId: String, messageId: String): AppSnapshot =
+        decode(SecureChatNative.openBurnMessageJson(dataDir, threadKind, threadId, messageId))
 
     fun createGroup(displayName: String): AppSnapshot =
         decode(SecureChatNative.createGroupJson(dataDir, displayName))
@@ -56,6 +71,12 @@ class SecureChatCoreClient(context: Context) {
 
     fun endTemporaryConnection(connectionId: String): AppSnapshot =
         decode(SecureChatNative.endTemporaryConnectionJson(dataDir, connectionId))
+
+    fun importSticker(filePath: String, displayName: String): ImportStickerResponse =
+        decode(SecureChatNative.importStickerJson(dataDir, filePath, displayName))
+
+    fun deleteSticker(stickerId: String): AppSnapshot =
+        decode(SecureChatNative.deleteStickerJson(dataDir, stickerId))
 
     fun receiveMessages(): ReceiveReport =
         decode(SecureChatNative.receiveJson(dataDir))

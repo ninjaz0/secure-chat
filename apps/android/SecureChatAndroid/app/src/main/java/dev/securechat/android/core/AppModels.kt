@@ -68,6 +68,8 @@ data class AppSnapshot(
     @SerialName("group_messages") val groupMessages: List<AppGroupMessage> = emptyList(),
     @SerialName("temporary_connections") val temporaryConnections: List<TemporaryConnection> = emptyList(),
     @SerialName("temporary_messages") val temporaryMessages: List<TemporaryMessage> = emptyList(),
+    val stickers: List<StickerItem> = emptyList(),
+    @SerialName("attachment_transfers") val attachmentTransfers: List<AttachmentTransfer> = emptyList(),
 )
 
 @Serializable
@@ -97,6 +99,7 @@ data class AppChatMessage(
     @SerialName("contact_id") val contactId: String,
     val direction: AppMessageDirection,
     val body: String,
+    val content: MessageContent = MessageContent(text = body),
     val status: AppMessageStatus,
     @SerialName("sent_at_unix") val sentAtUnix: Long,
     @SerialName("received_at_unix") val receivedAtUnix: Long? = null,
@@ -118,6 +121,7 @@ data class AppGroupMessage(
     @SerialName("sender_display_name") val senderDisplayName: String,
     val direction: AppMessageDirection,
     val body: String,
+    val content: MessageContent = MessageContent(text = body),
     val status: AppMessageStatus,
     @SerialName("sent_at_unix") val sentAtUnix: Long,
     @SerialName("received_at_unix") val receivedAtUnix: Long? = null,
@@ -141,9 +145,58 @@ data class TemporaryMessage(
     @SerialName("connection_id") val connectionId: String,
     val direction: AppMessageDirection,
     val body: String,
+    val content: MessageContent = MessageContent(text = body),
     val status: AppMessageStatus,
     @SerialName("sent_at_unix") val sentAtUnix: Long,
     @SerialName("received_at_unix") val receivedAtUnix: Long? = null,
+)
+
+@Serializable
+data class MessageContent(
+    val kind: String = "text",
+    val text: String? = null,
+    @SerialName("burn_id") val burnId: String? = null,
+    val destroyed: Boolean = false,
+    val attachment: AttachmentContent? = null,
+)
+
+@Serializable
+data class AttachmentContent(
+    val id: String,
+    val kind: String,
+    @SerialName("file_name") val fileName: String,
+    @SerialName("mime_type") val mimeType: String,
+    @SerialName("size_bytes") val sizeBytes: Long,
+    val sha256: String,
+    @SerialName("local_path") val localPath: String? = null,
+    @SerialName("transfer_status") val transferStatus: String = "",
+)
+
+@Serializable
+data class StickerItem(
+    val id: String,
+    @SerialName("display_name") val displayName: String,
+    @SerialName("file_name") val fileName: String,
+    @SerialName("mime_type") val mimeType: String,
+    @SerialName("size_bytes") val sizeBytes: Long,
+    val sha256: String,
+    @SerialName("local_path") val localPath: String,
+    @SerialName("created_at_unix") val createdAtUnix: Long,
+)
+
+@Serializable
+data class AttachmentTransfer(
+    val id: String,
+    @SerialName("thread_kind") val threadKind: String,
+    @SerialName("thread_id") val threadId: String,
+    val kind: String,
+    @SerialName("file_name") val fileName: String,
+    @SerialName("mime_type") val mimeType: String,
+    @SerialName("size_bytes") val sizeBytes: Long,
+    val sha256: String,
+    @SerialName("received_chunks") val receivedChunks: Long,
+    @SerialName("total_chunks") val totalChunks: Long,
+    val status: String,
 )
 
 @Serializable
@@ -208,6 +261,18 @@ data class ReceiveReport(
 @Serializable
 data class TemporaryStartResponse(
     @SerialName("connection_id") val connectionId: String,
+    val snapshot: AppSnapshot,
+)
+
+@Serializable
+data class SendAttachmentResponse(
+    @SerialName("attachment_id") val attachmentId: String,
+    val snapshot: AppSnapshot,
+)
+
+@Serializable
+data class ImportStickerResponse(
+    val sticker: StickerItem,
     val snapshot: AppSnapshot,
 )
 

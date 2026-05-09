@@ -114,6 +114,32 @@ enum SecureChatCoreClient {
         }
     }
 
+    static func updateContactDisplayName(contactID: String, displayName: String) throws -> AppSnapshot {
+        let dataDir = appDataDirectory
+        return try dataDir.withCString { dataDirPtr in
+            try contactID.withCString { contactPtr in
+                try displayName.withCString { displayNamePtr in
+                    try decodeCString(
+                        secure_chat_app_update_contact_display_name_json(dataDirPtr, contactPtr, displayNamePtr),
+                        as: AppSnapshot.self
+                    )
+                }
+            }
+        }
+    }
+
+    static func deleteContact(contactID: String) throws -> AppSnapshot {
+        let dataDir = appDataDirectory
+        return try dataDir.withCString { dataDirPtr in
+            try contactID.withCString { contactPtr in
+                try decodeCString(
+                    secure_chat_app_delete_contact_json(dataDirPtr, contactPtr),
+                    as: AppSnapshot.self
+                )
+            }
+        }
+    }
+
     static func startTemporaryConnection(inviteURI: String) throws -> TemporaryStartResponse {
         let dataDir = appDataDirectory
         return try dataDir.withCString { dataDirPtr in
@@ -161,6 +187,56 @@ enum SecureChatCoreClient {
                         secure_chat_app_send_message_json(dataDirPtr, contactPtr, bodyPtr),
                         as: AppSnapshot.self
                     )
+                }
+            }
+        }
+    }
+
+    static func sendAttachment(threadKind: String, threadID: String, filePath: String, kind: String) throws -> SendAttachmentResponse {
+        let dataDir = appDataDirectory
+        return try dataDir.withCString { dataDirPtr in
+            try threadKind.withCString { kindPtr in
+                try threadID.withCString { threadPtr in
+                    try filePath.withCString { filePtr in
+                        try kind.withCString { attachmentKindPtr in
+                            try decodeCString(
+                                secure_chat_app_send_attachment_json(dataDirPtr, kindPtr, threadPtr, filePtr, attachmentKindPtr),
+                                as: SendAttachmentResponse.self
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    static func sendBurnMessage(threadKind: String, threadID: String, body: String) throws -> AppSnapshot {
+        let dataDir = appDataDirectory
+        return try dataDir.withCString { dataDirPtr in
+            try threadKind.withCString { kindPtr in
+                try threadID.withCString { threadPtr in
+                    try body.withCString { bodyPtr in
+                        try decodeCString(
+                            secure_chat_app_send_burn_message_json(dataDirPtr, kindPtr, threadPtr, bodyPtr),
+                            as: AppSnapshot.self
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    static func openBurnMessage(threadKind: String, threadID: String, messageID: String) throws -> AppSnapshot {
+        let dataDir = appDataDirectory
+        return try dataDir.withCString { dataDirPtr in
+            try threadKind.withCString { kindPtr in
+                try threadID.withCString { threadPtr in
+                    try messageID.withCString { messagePtr in
+                        try decodeCString(
+                            secure_chat_app_open_burn_message_json(dataDirPtr, kindPtr, threadPtr, messagePtr),
+                            as: AppSnapshot.self
+                        )
+                    }
                 }
             }
         }
@@ -216,6 +292,32 @@ enum SecureChatCoreClient {
                         as: AppSnapshot.self
                     )
                 }
+            }
+        }
+    }
+
+    static func importSticker(filePath: String, displayName: String) throws -> ImportStickerResponse {
+        let dataDir = appDataDirectory
+        return try dataDir.withCString { dataDirPtr in
+            try filePath.withCString { filePtr in
+                try displayName.withCString { namePtr in
+                    try decodeCString(
+                        secure_chat_app_import_sticker_json(dataDirPtr, filePtr, namePtr),
+                        as: ImportStickerResponse.self
+                    )
+                }
+            }
+        }
+    }
+
+    static func deleteSticker(stickerID: String) throws -> AppSnapshot {
+        let dataDir = appDataDirectory
+        return try dataDir.withCString { dataDirPtr in
+            try stickerID.withCString { stickerPtr in
+                try decodeCString(
+                    secure_chat_app_delete_sticker_json(dataDirPtr, stickerPtr),
+                    as: AppSnapshot.self
+                )
             }
         }
     }

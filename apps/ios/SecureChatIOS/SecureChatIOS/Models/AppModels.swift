@@ -88,6 +88,8 @@ struct AppSnapshot: Decodable {
     let groupMessages: [AppGroupMessage]
     let temporaryConnections: [TemporaryConnection]
     let temporaryMessages: [TemporaryMessage]
+    let stickers: [StickerItem]
+    let attachmentTransfers: [AttachmentTransfer]
 }
 
 struct AppProfile: Decodable {
@@ -114,6 +116,7 @@ struct AppChatMessage: Decodable, Identifiable, Hashable {
     let contactId: String
     let direction: AppMessageDirection
     let body: String
+    let content: MessageContent
     let status: AppMessageStatus
     let sentAtUnix: UInt64
     let receivedAtUnix: UInt64?
@@ -133,6 +136,7 @@ struct AppGroupMessage: Decodable, Identifiable, Hashable {
     let senderDisplayName: String
     let direction: AppMessageDirection
     let body: String
+    let content: MessageContent
     let status: AppMessageStatus
     let sentAtUnix: UInt64
     let receivedAtUnix: UInt64?
@@ -154,9 +158,64 @@ struct TemporaryMessage: Decodable, Identifiable, Hashable {
     let connectionId: String
     let direction: AppMessageDirection
     let body: String
+    let content: MessageContent
     let status: AppMessageStatus
     let sentAtUnix: UInt64
     let receivedAtUnix: UInt64?
+}
+
+struct MessageContent: Decodable, Hashable {
+    let kind: String
+    let text: String?
+    let burnId: String?
+    let destroyed: Bool
+    let attachment: AttachmentContent?
+}
+
+struct AttachmentContent: Decodable, Identifiable, Hashable {
+    let id: String
+    let kind: String
+    let fileName: String
+    let mimeType: String
+    let sizeBytes: UInt64
+    let sha256: String
+    let localPath: String?
+    let transferStatus: String
+}
+
+struct StickerItem: Decodable, Identifiable, Hashable {
+    let id: String
+    let displayName: String
+    let fileName: String
+    let mimeType: String
+    let sizeBytes: UInt64
+    let sha256: String
+    let localPath: String
+    let createdAtUnix: UInt64
+}
+
+struct AttachmentTransfer: Decodable, Identifiable, Hashable {
+    let id: String
+    let threadKind: String
+    let threadId: String
+    let kind: String
+    let fileName: String
+    let mimeType: String
+    let sizeBytes: UInt64
+    let sha256: String
+    let receivedChunks: UInt64
+    let totalChunks: UInt64
+    let status: String
+}
+
+struct SendAttachmentResponse: Decodable {
+    let attachmentId: String
+    let snapshot: AppSnapshot
+}
+
+struct ImportStickerResponse: Decodable {
+    let sticker: StickerItem
+    let snapshot: AppSnapshot
 }
 
 enum AppMessageDirection: String, Decodable {

@@ -175,13 +175,96 @@ final class SecureChatStore: ObservableObject {
         }
     }
 
+    func updateContactDisplayName(contactID: String, displayName: String) async {
+        await runLoading {
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.updateContactDisplayName(contactID: contactID, displayName: displayName)
+            }
+            apply(snapshot: snapshot)
+        }
+    }
+
+    func deleteContact(contactID: String) async {
+        await runLoading {
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.deleteContact(contactID: contactID)
+            }
+            apply(snapshot: snapshot)
+            if selectedContactID == contactID {
+                selectedContactID = snapshot.contacts.first?.id
+            }
+        }
+    }
+
+    func sendAttachment(fileURL: URL, kind: String) async {
+        guard let thread = selectedThread else { return }
+        await runLoading {
+            let response = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.sendAttachment(
+                    threadKind: thread.kind,
+                    threadID: thread.id,
+                    filePath: fileURL.path,
+                    kind: kind
+                )
+            }
+            apply(snapshot: response.snapshot)
+        }
+    }
+
+    func sendBurnMessage(_ body: String) async {
+        guard let thread = selectedThread else { return }
+        await runLoading {
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.sendBurnMessage(threadKind: thread.kind, threadID: thread.id, body: body)
+            }
+            apply(snapshot: snapshot)
+        }
+    }
+
+    func openBurnMessage(messageID: String) async {
+        guard let thread = selectedThread else { return }
+        await runLoading {
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.openBurnMessage(threadKind: thread.kind, threadID: thread.id, messageID: messageID)
+            }
+            apply(snapshot: snapshot)
+        }
+    }
+
+    func importSticker(fileURL: URL) async {
+        await runLoading {
+            let response = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.importSticker(
+                    filePath: fileURL.path,
+                    displayName: fileURL.deletingPathExtension().lastPathComponent
+                )
+            }
+            apply(snapshot: response.snapshot)
+        }
+    }
+
+    func sendSticker(_ sticker: StickerItem) async {
+        await sendAttachment(fileURL: URL(fileURLWithPath: sticker.localPath), kind: "sticker")
+    }
+
+    func deleteSticker(stickerID: String) async {
+        await runLoading {
+            let snapshot = try await SecureChatCoreClient.runInBackground {
+                try SecureChatCoreClient.deleteSticker(stickerID: stickerID)
+            }
+            apply(snapshot: snapshot)
+        }
+    }
+
     func createGroup(displayName: String) async {
         await runLoading {
             let snapshot = try await SecureChatCoreClient.runInBackground {
                 try SecureChatCoreClient.createGroup(displayName: displayName)
             }
             apply(snapshot: snapshot)
+            selectedContactID = nil
             selectedGroupID = snapshot.groups.first { $0.displayName == displayName }?.id ?? snapshot.groups.first?.id
+            selectedTemporaryConnectionID = nil
         }
     }
 
@@ -335,16 +418,39 @@ final class SecureChatStore: ObservableObject {
 
     private func apply(snapshot: AppSnapshot) {
         appSnapshot = snapshot
-        if selectedContactID == nil || !(snapshot.contacts.contains { $0.id == selectedContactID }) {
-            selectedContactID = snapshot.contacts.first?.id
+        if let selectedContactID,
+           !(snapshot.contacts.contains { $0.id == selectedContactID }) {
+            self.selectedContactID = nil
         }
-        if selectedGroupID == nil || !(snapshot.groups.contains { $0.id == selectedGroupID }) {
-            selectedGroupID = snapshot.groups.first?.id
+        if let selectedGroupID,
+           !(snapshot.groups.contains { $0.id == selectedGroupID }) {
+            self.selectedGroupID = nil
         }
         if let selectedTemporaryConnectionID,
            !(snapshot.temporaryConnections.contains { $0.id == selectedTemporaryConnectionID }) {
             self.selectedTemporaryConnectionID = nil
         }
+        if selectedTemporaryConnectionID != nil {
+            selectedContactID = nil
+            selectedGroupID = nil
+        } else if selectedGroupID != nil {
+            selectedContactID = nil
+        } else if selectedContactID == nil {
+            selectedContactID = snapshot.contacts.first?.id
+        }
+    }
+
+    private var selectedThread: (kind: String, id: String)? {
+        if let selectedTemporaryConnectionID {
+            return ("temporary", selectedTemporaryConnectionID)
+        }
+        if let selectedGroupID {
+            return ("group", selectedGroupID)
+        }
+        if let selectedContactID {
+            return ("contact", selectedContactID)
+        }
+        return nil
     }
 
     @discardableResult

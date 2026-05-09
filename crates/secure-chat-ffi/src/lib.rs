@@ -264,6 +264,62 @@ pub extern "C" fn secure_chat_app_add_contact_json(
 }
 
 #[no_mangle]
+pub extern "C" fn secure_chat_app_update_contact_display_name_json(
+    data_dir: *const c_char,
+    contact_id: *const c_char,
+    display_name: *const c_char,
+) -> *mut c_char {
+    json_to_c_string(
+        match (
+            c_arg(data_dir, "data_dir"),
+            c_arg(contact_id, "contact_id"),
+            c_arg(display_name, "display_name"),
+        ) {
+            (Ok(data_dir), Ok(contact_id), Ok(display_name)) => {
+                match secure_chat_desktop::DesktopRuntime::update_contact_display_name(
+                    data_dir,
+                    &contact_id,
+                    &display_name,
+                ) {
+                    Ok(snapshot) => to_value(snapshot),
+                    Err(err) => error_json(err.to_string()),
+                }
+            }
+            (data_dir, contact_id, display_name) => error_json(
+                data_dir
+                    .err()
+                    .or_else(|| contact_id.err())
+                    .or_else(|| display_name.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn secure_chat_app_delete_contact_json(
+    data_dir: *const c_char,
+    contact_id: *const c_char,
+) -> *mut c_char {
+    json_to_c_string(
+        match (c_arg(data_dir, "data_dir"), c_arg(contact_id, "contact_id")) {
+            (Ok(data_dir), Ok(contact_id)) => {
+                match secure_chat_desktop::DesktopRuntime::delete_contact(data_dir, &contact_id) {
+                    Ok(snapshot) => to_value(snapshot),
+                    Err(err) => error_json(err.to_string()),
+                }
+            }
+            (data_dir, contact_id) => error_json(
+                data_dir
+                    .err()
+                    .or_else(|| contact_id.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        },
+    )
+}
+
+#[no_mangle]
 pub extern "C" fn secure_chat_app_send_temporary_message_json(
     data_dir: *const c_char,
     connection_id: *const c_char,
@@ -352,6 +408,125 @@ pub extern "C" fn secure_chat_app_send_message_json(
                     .err()
                     .or_else(|| contact_id.err())
                     .or_else(|| body.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn secure_chat_app_send_attachment_json(
+    data_dir: *const c_char,
+    thread_kind: *const c_char,
+    thread_id: *const c_char,
+    file_path: *const c_char,
+    kind: *const c_char,
+) -> *mut c_char {
+    json_to_c_string(
+        match (
+            c_arg(data_dir, "data_dir"),
+            c_arg(thread_kind, "thread_kind"),
+            c_arg(thread_id, "thread_id"),
+            c_arg(file_path, "file_path"),
+            c_arg(kind, "kind"),
+        ) {
+            (Ok(data_dir), Ok(thread_kind), Ok(thread_id), Ok(file_path), Ok(kind)) => {
+                desktop_async(|runtime| {
+                    runtime
+                        .block_on(secure_chat_desktop::DesktopRuntime::send_attachment(
+                            data_dir,
+                            &thread_kind,
+                            &thread_id,
+                            &file_path,
+                            &kind,
+                        ))
+                        .map(to_value)
+                        .unwrap_or_else(|err| error_json(err.to_string()))
+                })
+            }
+            (data_dir, thread_kind, thread_id, file_path, kind) => error_json(
+                data_dir
+                    .err()
+                    .or_else(|| thread_kind.err())
+                    .or_else(|| thread_id.err())
+                    .or_else(|| file_path.err())
+                    .or_else(|| kind.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn secure_chat_app_send_burn_message_json(
+    data_dir: *const c_char,
+    thread_kind: *const c_char,
+    thread_id: *const c_char,
+    body: *const c_char,
+) -> *mut c_char {
+    json_to_c_string(
+        match (
+            c_arg(data_dir, "data_dir"),
+            c_arg(thread_kind, "thread_kind"),
+            c_arg(thread_id, "thread_id"),
+            c_arg(body, "body"),
+        ) {
+            (Ok(data_dir), Ok(thread_kind), Ok(thread_id), Ok(body)) => desktop_async(|runtime| {
+                runtime
+                    .block_on(secure_chat_desktop::DesktopRuntime::send_burn_message(
+                        data_dir,
+                        &thread_kind,
+                        &thread_id,
+                        &body,
+                    ))
+                    .map(to_value)
+                    .unwrap_or_else(|err| error_json(err.to_string()))
+            }),
+            (data_dir, thread_kind, thread_id, body) => error_json(
+                data_dir
+                    .err()
+                    .or_else(|| thread_kind.err())
+                    .or_else(|| thread_id.err())
+                    .or_else(|| body.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn secure_chat_app_open_burn_message_json(
+    data_dir: *const c_char,
+    thread_kind: *const c_char,
+    thread_id: *const c_char,
+    message_id: *const c_char,
+) -> *mut c_char {
+    json_to_c_string(
+        match (
+            c_arg(data_dir, "data_dir"),
+            c_arg(thread_kind, "thread_kind"),
+            c_arg(thread_id, "thread_id"),
+            c_arg(message_id, "message_id"),
+        ) {
+            (Ok(data_dir), Ok(thread_kind), Ok(thread_id), Ok(message_id)) => {
+                desktop_async(|runtime| {
+                    runtime
+                        .block_on(secure_chat_desktop::DesktopRuntime::open_burn_message(
+                            data_dir,
+                            &thread_kind,
+                            &thread_id,
+                            &message_id,
+                        ))
+                        .map(to_value)
+                        .unwrap_or_else(|err| error_json(err.to_string()))
+                })
+            }
+            (data_dir, thread_kind, thread_id, message_id) => error_json(
+                data_dir
+                    .err()
+                    .or_else(|| thread_kind.err())
+                    .or_else(|| thread_id.err())
+                    .or_else(|| message_id.err())
                     .unwrap_or_else(|| "invalid arguments".to_string()),
             ),
         },
@@ -482,6 +657,62 @@ pub extern "C" fn secure_chat_app_register_push_token_json(
                     .err()
                     .or_else(|| token.err())
                     .or_else(|| platform.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn secure_chat_app_import_sticker_json(
+    data_dir: *const c_char,
+    file_path: *const c_char,
+    display_name: *const c_char,
+) -> *mut c_char {
+    json_to_c_string(
+        match (
+            c_arg(data_dir, "data_dir"),
+            c_arg(file_path, "file_path"),
+            c_arg(display_name, "display_name"),
+        ) {
+            (Ok(data_dir), Ok(file_path), Ok(display_name)) => {
+                match secure_chat_desktop::DesktopRuntime::import_sticker(
+                    data_dir,
+                    &file_path,
+                    &display_name,
+                ) {
+                    Ok(response) => to_value(response),
+                    Err(err) => error_json(err.to_string()),
+                }
+            }
+            (data_dir, file_path, display_name) => error_json(
+                data_dir
+                    .err()
+                    .or_else(|| file_path.err())
+                    .or_else(|| display_name.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn secure_chat_app_delete_sticker_json(
+    data_dir: *const c_char,
+    sticker_id: *const c_char,
+) -> *mut c_char {
+    json_to_c_string(
+        match (c_arg(data_dir, "data_dir"), c_arg(sticker_id, "sticker_id")) {
+            (Ok(data_dir), Ok(sticker_id)) => {
+                match secure_chat_desktop::DesktopRuntime::delete_sticker(data_dir, &sticker_id) {
+                    Ok(snapshot) => to_value(snapshot),
+                    Err(err) => error_json(err.to_string()),
+                }
+            }
+            (data_dir, sticker_id) => error_json(
+                data_dir
+                    .err()
+                    .or_else(|| sticker_id.err())
                     .unwrap_or_else(|| "invalid arguments".to_string()),
             ),
         },
@@ -713,6 +944,53 @@ mod android_jni {
     }
 
     #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_updateContactDisplayNameJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        contact_id: JString,
+        display_name: JString,
+    ) -> jstring {
+        let value = with_3(
+            &mut env,
+            data_dir,
+            "data_dir",
+            contact_id,
+            "contact_id",
+            display_name,
+            "display_name",
+            |data_dir, contact_id, display_name| {
+                DesktopRuntime::update_contact_display_name(data_dir, &contact_id, &display_name)
+                    .map(to_value)
+                    .unwrap_or_else(|err| error_json(err.to_string()))
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_deleteContactJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        contact_id: JString,
+    ) -> jstring {
+        let value = with_2(
+            &mut env,
+            data_dir,
+            "data_dir",
+            contact_id,
+            "contact_id",
+            |data_dir, contact_id| {
+                DesktopRuntime::delete_contact(data_dir, &contact_id)
+                    .map(to_value)
+                    .unwrap_or_else(|err| error_json(err.to_string()))
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
     pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_startTemporaryConnectionJson(
         mut env: JNIEnv,
         _class: JClass,
@@ -754,6 +1032,118 @@ mod android_jni {
                 desktop_async(|runtime| {
                     runtime
                         .block_on(DesktopRuntime::send_message(data_dir, &contact_id, &body))
+                        .map(to_value)
+                        .unwrap_or_else(|err| error_json(err.to_string()))
+                })
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_sendAttachmentJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        thread_kind: JString,
+        thread_id: JString,
+        file_path: JString,
+        kind: JString,
+    ) -> jstring {
+        let value = with_5(
+            &mut env,
+            data_dir,
+            "data_dir",
+            thread_kind,
+            "thread_kind",
+            thread_id,
+            "thread_id",
+            file_path,
+            "file_path",
+            kind,
+            "kind",
+            |data_dir, thread_kind, thread_id, file_path, kind| {
+                desktop_async(|runtime| {
+                    runtime
+                        .block_on(DesktopRuntime::send_attachment(
+                            data_dir,
+                            &thread_kind,
+                            &thread_id,
+                            &file_path,
+                            &kind,
+                        ))
+                        .map(to_value)
+                        .unwrap_or_else(|err| error_json(err.to_string()))
+                })
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_sendBurnMessageJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        thread_kind: JString,
+        thread_id: JString,
+        body: JString,
+    ) -> jstring {
+        let value = with_4(
+            &mut env,
+            data_dir,
+            "data_dir",
+            thread_kind,
+            "thread_kind",
+            thread_id,
+            "thread_id",
+            body,
+            "body",
+            |data_dir, thread_kind, thread_id, body| {
+                desktop_async(|runtime| {
+                    runtime
+                        .block_on(DesktopRuntime::send_burn_message(
+                            data_dir,
+                            &thread_kind,
+                            &thread_id,
+                            &body,
+                        ))
+                        .map(to_value)
+                        .unwrap_or_else(|err| error_json(err.to_string()))
+                })
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_openBurnMessageJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        thread_kind: JString,
+        thread_id: JString,
+        message_id: JString,
+    ) -> jstring {
+        let value = with_4(
+            &mut env,
+            data_dir,
+            "data_dir",
+            thread_kind,
+            "thread_kind",
+            thread_id,
+            "thread_id",
+            message_id,
+            "message_id",
+            |data_dir, thread_kind, thread_id, message_id| {
+                desktop_async(|runtime| {
+                    runtime
+                        .block_on(DesktopRuntime::open_burn_message(
+                            data_dir,
+                            &thread_kind,
+                            &thread_id,
+                            &message_id,
+                        ))
                         .map(to_value)
                         .unwrap_or_else(|err| error_json(err.to_string()))
                 })
@@ -937,6 +1327,53 @@ mod android_jni {
         json_out(&mut env, value)
     }
 
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_importStickerJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        file_path: JString,
+        display_name: JString,
+    ) -> jstring {
+        let value = with_3(
+            &mut env,
+            data_dir,
+            "data_dir",
+            file_path,
+            "file_path",
+            display_name,
+            "display_name",
+            |data_dir, file_path, display_name| {
+                DesktopRuntime::import_sticker(data_dir, &file_path, &display_name)
+                    .map(to_value)
+                    .unwrap_or_else(|err| error_json(err.to_string()))
+            },
+        );
+        json_out(&mut env, value)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_dev_securechat_android_core_SecureChatNative_deleteStickerJson(
+        mut env: JNIEnv,
+        _class: JClass,
+        data_dir: JString,
+        sticker_id: JString,
+    ) -> jstring {
+        let value = with_2(
+            &mut env,
+            data_dir,
+            "data_dir",
+            sticker_id,
+            "sticker_id",
+            |data_dir, sticker_id| {
+                DesktopRuntime::delete_sticker(data_dir, &sticker_id)
+                    .map(to_value)
+                    .unwrap_or_else(|err| error_json(err.to_string()))
+            },
+        );
+        json_out(&mut env, value)
+    }
+
     fn with_1(
         env: &mut JNIEnv,
         value: JString,
@@ -992,6 +1429,72 @@ mod android_jni {
                     .err()
                     .or_else(|| second.err())
                     .or_else(|| third.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        }
+    }
+
+    fn with_4(
+        env: &mut JNIEnv,
+        first: JString,
+        first_name: &str,
+        second: JString,
+        second_name: &str,
+        third: JString,
+        third_name: &str,
+        fourth: JString,
+        fourth_name: &str,
+        work: impl FnOnce(String, String, String, String) -> serde_json::Value,
+    ) -> serde_json::Value {
+        match (
+            jstring_arg(env, first, first_name),
+            jstring_arg(env, second, second_name),
+            jstring_arg(env, third, third_name),
+            jstring_arg(env, fourth, fourth_name),
+        ) {
+            (Ok(first), Ok(second), Ok(third), Ok(fourth)) => work(first, second, third, fourth),
+            (first, second, third, fourth) => error_json(
+                first
+                    .err()
+                    .or_else(|| second.err())
+                    .or_else(|| third.err())
+                    .or_else(|| fourth.err())
+                    .unwrap_or_else(|| "invalid arguments".to_string()),
+            ),
+        }
+    }
+
+    fn with_5(
+        env: &mut JNIEnv,
+        first: JString,
+        first_name: &str,
+        second: JString,
+        second_name: &str,
+        third: JString,
+        third_name: &str,
+        fourth: JString,
+        fourth_name: &str,
+        fifth: JString,
+        fifth_name: &str,
+        work: impl FnOnce(String, String, String, String, String) -> serde_json::Value,
+    ) -> serde_json::Value {
+        match (
+            jstring_arg(env, first, first_name),
+            jstring_arg(env, second, second_name),
+            jstring_arg(env, third, third_name),
+            jstring_arg(env, fourth, fourth_name),
+            jstring_arg(env, fifth, fifth_name),
+        ) {
+            (Ok(first), Ok(second), Ok(third), Ok(fourth), Ok(fifth)) => {
+                work(first, second, third, fourth, fifth)
+            }
+            (first, second, third, fourth, fifth) => error_json(
+                first
+                    .err()
+                    .or_else(|| second.err())
+                    .or_else(|| third.err())
+                    .or_else(|| fourth.err())
+                    .or_else(|| fifth.err())
                     .unwrap_or_else(|| "invalid arguments".to_string()),
             ),
         }

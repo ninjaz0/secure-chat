@@ -10,7 +10,7 @@ chat.example.com
 
 ## 你需要准备什么
 
-- 两台客户端设备：macOS 或 iOS 都可以混用
+- 两台客户端设备：macOS、iOS 或 Android 都可以混用
 - 一个可访问的 relay：
   - QUIC URL：`quic://chat.example.com:443`
   - HTTPS URL：`https://chat.example.com`
@@ -40,6 +40,14 @@ open apps/ios/SecureChatIOS/SecureChatIOS.xcodeproj
 ```
 
 iOS 与 macOS 使用同一个 Rust FFI 安全核心和同一个 relay 协议，只要 Relay URL 一致，就可以互相加好友和收发消息。
+
+Android 客户端构建：
+
+```bash
+./script/build_android.sh debug
+```
+
+Android 与 macOS/iOS 也通过同一个 Rust FFI/JNI 安全核心和同一个 relay 协议互通。
 
 ## 第一次创建本地身份
 
@@ -124,6 +132,30 @@ Command + Return
 - `received`：本机收到的入站消息
 - `failed`：发送失败或本地处理失败
 
+当前聊天输入区还支持：
+
+- 直接输入 Unicode emoji，例如系统键盘里的表情，不需要转义。
+- 发送图片，图片会以缩略图形式显示。
+- 发送普通文件，气泡会展示文件名、大小和传输状态。
+- 导入本地表情图片/GIF，再从表情入口发送。表情包是本地功能，接收方不需要提前导入同一套表情。
+- 发送阅后即焚消息。对方打开后，本地内容会替换成已销毁状态，并尽力向其他设备发送销毁通知。
+
+聊天滚动行为与常见聊天软件一致：如果你已经在最新消息附近，新消息会自动滚到底部；如果你正在回看历史，新消息不会打断当前位置，只显示“新消息”提示，点击提示后回到底部。你自己发送消息时始终回到最新。
+
+## 联系人管理
+
+联系人详情或上下文菜单支持编辑昵称和删除联系人。
+
+- 编辑昵称只改变本机展示名，不会修改对方设备上的名字。
+- 删除联系人是本地强删除，会删除该联系人、1 对 1 消息、会话密钥和相关未完成附件。
+- 删除不会远程清除对方设备上的联系人或历史。对方未来再次发来消息时，会重新作为未命名未验证联系人出现。
+
+## 群聊和临时会话
+
+- 群聊可从已有联系人创建。群消息按成员设备 fan-out 发送，附件、图片、表情和阅后即焚使用同一套内容模型。
+- 临时会话适合短时间交流，临时邀请和临时消息有有效期。会话结束时，本地临时消息和相关附件会被清理。
+- 群聊仍是 per-device 模型，一个人的多设备不会自动合并成单一用户。
+
 ## 接收消息
 
 工具栏有两个接收相关控件：
@@ -146,7 +178,7 @@ Command + Return
 ## 两个人跨公网互聊的最短路径
 
 1. 服务器部署 relay。
-2. Alice 和 Bob 都把 Relay URL 设置成 `quic://chat.example.com:443`，无论一方是 macOS 还是 iOS。
+2. Alice 和 Bob 都把 Relay URL 设置成 `quic://chat.example.com:443`，无论一方是 macOS、iOS 还是 Android。
 3. Alice 复制 invite 给 Bob。
 4. Bob 导入 Alice invite。
 5. Bob 复制 invite 给 Alice。
@@ -229,8 +261,9 @@ schat://invite/
 
 ## 当前限制
 
-- 只支持 1 对 1 聊天。
 - 没有手机号、邮箱和公开用户名搜索。
-- macOS app 使用后台轮询，不是 APNs 推送。
+- macOS/iOS/Android 客户端当前仍以运行期间轮询为主；真实后台推送需要平台签名、entitlement、bundle topic 和 relay APNs/Firebase 等后续配置。
+- 附件不设产品级单文件上限，但实际会受 relay 单条密文约 1MB、队列、磁盘、网络和系统资源限制。
+- 群聊仍是 OpenMLS ciphersuite-oriented 原型，不等同于完整 MLS state machine。
 - P2P NAT traversal 已支持签名 UDP rendezvous、候选地址交换和直连探测；复杂 NAT 下会继续回退到 relay。
 - 没有第三方安全审计前，不要把它当成已经审计过的安全通信产品。

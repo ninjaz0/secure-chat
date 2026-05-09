@@ -2,11 +2,16 @@ package dev.securechat.android.core
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import java.io.File
+import java.io.FileOutputStream
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -119,6 +124,24 @@ class SecureChatViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    fun updateContactDisplayName(contactId: String, displayName: String) {
+        val name = displayName.trim()
+        if (name.isEmpty()) return
+        runCore {
+            applySnapshot(callCore { client.updateContactDisplayName(contactId, name) })
+            uiState = uiState.copy(selectedContactId = contactId, selectedGroupId = null, selectedTemporaryConnectionId = null)
+        }
+    }
+
+    fun deleteContact(contactId: String) {
+        runCore {
+            applySnapshot(callCore { client.deleteContact(contactId) })
+            if (uiState.selectedContactId == contactId) {
+                uiState = uiState.copy(selectedContactId = uiState.snapshot?.contacts?.firstOrNull()?.id)
+            }
+        }
+    }
+
     fun startTemporaryConnection(inviteUri: String) {
         runCore {
             val response = callCore { client.startTemporaryConnection(inviteUri.trim()) }
@@ -179,6 +202,57 @@ class SecureChatViewModel(application: Application) : AndroidViewModel(applicati
         runCore {
             applySnapshot(callCore { client.sendTemporaryMessage(connectionId, text) })
             uiState = uiState.copy(selectedContactId = null, selectedGroupId = null, selectedTemporaryConnectionId = connectionId)
+        }
+    }
+
+    fun sendAttachment(uri: Uri, kind: String) {
+        val thread = selectedThread() ?: return
+        runCore {
+            val localFile = callCore { copyUriToOutbox(uri, kind) }
+            val response = callCore { client.sendAttachment(thread.kind, thread.id, localFile.absolutePath, kind) }
+            applySnapshot(response.snapshot)
+            restoreThread(thread)
+        }
+    }
+
+    fun sendBurnMessage(body: String) {
+        val thread = selectedThread() ?: return
+        val text = body.trim()
+        if (text.isEmpty()) return
+        runCore {
+            applySnapshot(callCore { client.sendBurnMessage(thread.kind, thread.id, text) })
+            restoreThread(thread)
+        }
+    }
+
+    fun openBurnMessage(messageId: String) {
+        val thread = selectedThread() ?: return
+        runCore {
+            applySnapshot(callCore { client.openBurnMessage(thread.kind, thread.id, messageId) })
+            restoreThread(thread)
+        }
+    }
+
+    fun importSticker(uri: Uri) {
+        runCore {
+            val localFile = callCore { copyUriToOutbox(uri, "sticker") }
+            val response = callCore { client.importSticker(localFile.absolutePath, localFile.nameWithoutExtension) }
+            applySnapshot(response.snapshot)
+        }
+    }
+
+    fun sendSticker(sticker: StickerItem) {
+        val thread = selectedThread() ?: return
+        runCore {
+            val response = callCore { client.sendAttachment(thread.kind, thread.id, sticker.localPath, "sticker") }
+            applySnapshot(response.snapshot)
+            restoreThread(thread)
+        }
+    }
+
+    fun deleteSticker(stickerId: String) {
+        runCore {
+            applySnapshot(callCore { client.deleteSticker(stickerId) })
         }
     }
 
@@ -306,6 +380,61 @@ class SecureChatViewModel(application: Application) : AndroidViewModel(applicati
             selectedGroupId = selectedGroupId,
             selectedTemporaryConnectionId = selectedTemporaryConnectionId,
         )
+    }
+
+    private data class SelectedThread(val kind: String, val id: String)
+
+    private fun selectedThread(): SelectedThread? =
+        when {
+            uiState.selectedTemporaryConnectionId != null -> SelectedThread("temporary", uiState.selectedTemporaryConnectionId!!)
+            uiState.selectedGroupId != null -> SelectedThread("group", uiState.selectedGroupId!!)
+            uiState.selectedContactId != null -> SelectedThread("contact", uiState.selectedContactId!!)
+            else -> null
+        }
+
+    private fun restoreThread(thread: SelectedThread) {
+        uiState = when (thread.kind) {
+            "temporary" -> uiState.copy(selectedContactId = null, selectedGroupId = null, selectedTemporaryConnectionId = thread.id)
+            "group" -> uiState.copy(selectedContactId = null, selectedGroupId = thread.id, selectedTemporaryConnectionId = null)
+            else -> uiState.copy(selectedContactId = thread.id, selectedGroupId = null, selectedTemporaryConnectionId = null)
+        }
+    }
+
+    private fun copyUriToOutbox(uri: Uri, kind: String): File {
+        val application = getApplication<Application>()
+        val resolver = application.contentResolver
+        val displayName = displayNameFor(uri) ?: fallbackName(uri, kind)
+        val cleanName = displayName.replace(Regex("[^A-Za-z0-9._ -]"), "_").ifBlank { fallbackName(uri, kind) }
+        val outputDir = File(application.noBackupFilesDir, "SecureChatAndroid/outbox").apply { mkdirs() }
+        val outputFile = File(outputDir, "${UUID.randomUUID()}-$cleanName")
+        resolver.openInputStream(uri).use { input ->
+            requireNotNull(input) { "Unable to open selected file" }
+            FileOutputStream(outputFile).use { output ->
+                input.copyTo(output)
+            }
+        }
+        return outputFile
+    }
+
+    private fun displayNameFor(uri: Uri): String? {
+        val resolver = getApplication<Application>().contentResolver
+        return resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index >= 0) cursor.getString(index) else null
+            } else {
+                null
+            }
+        }
+    }
+
+    private fun fallbackName(uri: Uri, kind: String): String {
+        val lastSegment = uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+        if (lastSegment != null) return lastSegment
+        return when (kind) {
+            "image", "sticker" -> "image"
+            else -> "attachment"
+        }
     }
 
     private fun startAutoReceiveLoop() {

@@ -68,6 +68,47 @@ Body:
 All clear header fields and protected header contents are authenticated as AEAD
 associated data.
 
+## Versioned Content Payloads
+
+SecureChat v0.2.5 keeps the ratchet wire format stable and extends the plaintext
+JSON carried inside the encrypted body. New messages use a versioned content
+payload with these logical kinds:
+
+- `text`: normal text, including Unicode emoji entered by the platform input
+  method.
+- `image` and `file`: attachment metadata plus encrypted chunk state. The relay
+  still only stores opaque ciphertext frames.
+- `sticker`: a locally imported image/GIF sent as a lightweight image message;
+  sticker packs are local only and are not synchronized as packs.
+- `burn`: burn-after-reading text or attachment content with a burn ID.
+- `destroy`: a best-effort destruction notice for a previously opened burn
+  message.
+
+The UI-facing `body` field remains a compatibility fallback for old text rows.
+Receivers that do not understand a newer content kind should display the fallback
+text instead of treating the whole message as undecryptable.
+
+## Attachments And Stickers
+
+Attachments are split before relay submission so each encrypted relay message
+stays below the relay payload limit. Metadata records include attachment ID,
+kind, file name, MIME type, byte size, sha256, local path, transfer state, and
+chunk counters.
+
+Image messages render from the reassembled local file. File messages expose the
+file name, size, transfer status, and local path. Sticker messages use the same
+encrypted attachment path but a compact bubble style. Importing a sticker pack is
+a local client operation: selecting a sticker sends that image to the recipient,
+so the recipient does not need to own the same pack.
+
+## Burn-After-Reading
+
+Burn-after-reading v1 is "destroy on open". When a receiver opens a burn message,
+the runtime replaces the local encrypted body with a destroyed placeholder,
+removes associated attachment files when present, and sends an encrypted destroy
+notice back to the peer or group members. Destroy notices are delivered through
+the normal relay queue and therefore are best effort within relay TTL.
+
 ## Out-Of-Band Verification
 
 The safety number is derived from a canonical digest of both sides' public device
@@ -174,7 +215,8 @@ The desktop runtime separates long-lived secrets from app records:
 
 - macOS Keychain stores the device identity key material and a local storage key.
 - SQLite stores profile metadata, contacts, encrypted Double Ratchet session
-  state, encrypted message bodies, and cached relay ciphertext envelopes.
+  state, encrypted message bodies, attachment metadata, local attachment paths,
+  sticker packs/items, burn state, and cached relay ciphertext envelopes.
 - Message bodies and session states are encrypted at rest with
   ChaCha20-Poly1305 using the local storage key from Keychain.
 
@@ -184,3 +226,7 @@ are drained in the background.
 
 The UI decrypts local message bodies only through the Rust runtime when it
 renders the current snapshot.
+
+Deleting a contact is a local strong delete. The runtime removes the contact,
+one-to-one messages, ratchet session state, and related incomplete attachment
+state. It does not delete history from the other person's devices.

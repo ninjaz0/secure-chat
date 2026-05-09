@@ -16,7 +16,9 @@ use secure_chat_core::{
     ReceiptRequest, SendRequest, TransportFrame, TransportKind, GROUP_TRANSPORT_KIND,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -32,6 +34,8 @@ const TEMP_MESSAGE_TTL_SECS: u64 = 10 * 60;
 const MAX_TEMP_CONNECTIONS: usize = 32;
 const MAX_TEMP_MESSAGES_PER_CONNECTION: usize = 200;
 const SNAPSHOT_MESSAGES_PER_THREAD: i64 = 500;
+const CONTENT_PREFIX: &str = "securechat-content-v1:";
+const ATTACHMENT_CHUNK_BYTES: usize = 384 * 1024;
 
 #[derive(Debug, Error)]
 pub enum DesktopError {
@@ -67,6 +71,10 @@ pub enum DesktopError {
     EmptyContactName,
     #[error("message body cannot be empty")]
     EmptyMessage,
+    #[error("file not found")]
+    FileNotFound,
+    #[error("attachment transfer is incomplete")]
+    IncompleteAttachment,
     #[error("group not found")]
     GroupNotFound,
     #[error("group name cannot be empty")]
@@ -83,6 +91,8 @@ pub struct AppSnapshot {
     pub group_messages: Vec<GroupMessageView>,
     pub temporary_connections: Vec<TemporaryConnectionSummary>,
     pub temporary_messages: Vec<TemporaryMessageView>,
+    pub stickers: Vec<StickerItemView>,
+    pub attachment_transfers: Vec<AttachmentTransferView>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -112,6 +122,7 @@ pub struct ChatMessageView {
     pub contact_id: String,
     pub direction: MessageDirection,
     pub body: String,
+    pub content: MessageContentView,
     pub status: MessageStatus,
     pub sent_at_unix: u64,
     pub received_at_unix: Option<u64>,
@@ -140,9 +151,31 @@ pub struct GroupMessageView {
     pub sender_display_name: String,
     pub direction: MessageDirection,
     pub body: String,
+    pub content: MessageContentView,
     pub status: MessageStatus,
     pub sent_at_unix: u64,
     pub received_at_unix: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AttachmentView {
+    pub id: String,
+    pub kind: String,
+    pub file_name: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub local_path: Option<String>,
+    pub transfer_status: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MessageContentView {
+    pub kind: String,
+    pub text: Option<String>,
+    pub burn_id: Option<String>,
+    pub destroyed: bool,
+    pub attachment: Option<AttachmentView>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -244,6 +277,7 @@ pub struct TemporaryMessageView {
     pub connection_id: String,
     pub direction: MessageDirection,
     pub body: String,
+    pub content: MessageContentView,
     pub status: MessageStatus,
     pub sent_at_unix: u64,
     pub received_at_unix: Option<u64>,
@@ -259,6 +293,89 @@ pub struct TemporaryInviteResponse {
 pub struct TemporaryStartResponse {
     pub connection_id: String,
     pub snapshot: AppSnapshot,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StickerItemView {
+    pub id: String,
+    pub display_name: String,
+    pub file_name: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub local_path: String,
+    pub created_at_unix: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AttachmentTransferView {
+    pub id: String,
+    pub thread_kind: String,
+    pub thread_id: String,
+    pub kind: String,
+    pub file_name: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub received_chunks: u64,
+    pub total_chunks: u64,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SendAttachmentResponse {
+    pub attachment_id: String,
+    pub snapshot: AppSnapshot,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImportStickerResponse {
+    pub sticker: StickerItemView,
+    pub snapshot: AppSnapshot,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WireContent {
+    kind: String,
+    text: Option<String>,
+    burn_id: Option<String>,
+    destroyed: Option<bool>,
+    target_burn_id: Option<String>,
+    attachment: Option<AttachmentView>,
+    attachment_id: Option<String>,
+    file_name: Option<String>,
+    mime_type: Option<String>,
+    size_bytes: Option<u64>,
+    sha256: Option<String>,
+    chunk_index: Option<u64>,
+    total_chunks: Option<u64>,
+    data_base64: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThreadKind {
+    Contact,
+    Group,
+    Temporary,
+}
+
+impl ThreadKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Contact => "contact",
+            Self::Group => "group",
+            Self::Temporary => "temporary",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "contact" => Some(Self::Contact),
+            "group" => Some(Self::Group),
+            "temporary" => Some(Self::Temporary),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -336,6 +453,8 @@ impl DesktopRuntime {
                 group_messages: Vec::new(),
                 temporary_connections: Vec::new(),
                 temporary_messages: Vec::new(),
+                stickers: Vec::new(),
+                attachment_transfers: Vec::new(),
             });
         };
         let keys = self.load_device_keys()?;
@@ -347,6 +466,8 @@ impl DesktopRuntime {
         let group_messages = self.group_message_views(&storage_key)?;
         let temporary_connections = self.temporary_connection_summaries(&storage_key)?;
         let temporary_messages = self.temporary_message_views(&storage_key)?;
+        let stickers = self.sticker_items()?;
+        let attachment_transfers = self.attachment_transfers()?;
         Ok(AppSnapshot {
             ready: true,
             profile: Some(AppProfile {
@@ -362,6 +483,8 @@ impl DesktopRuntime {
             group_messages,
             temporary_connections,
             temporary_messages,
+            stickers,
+            attachment_transfers,
         })
     }
 
@@ -431,6 +554,61 @@ impl DesktopRuntime {
             display_name
         };
         runtime.add_contact_inner(display_name, &preview.normalized_invite_uri)?;
+        runtime.snapshot()
+    }
+
+    pub fn update_contact_display_name(
+        data_dir: impl AsRef<Path>,
+        contact_id: &str,
+        display_name: &str,
+    ) -> Result<AppSnapshot, DesktopError> {
+        let runtime = Self::open(data_dir)?;
+        runtime.ensure_profile()?;
+        let display_name = display_name.trim();
+        if display_name.is_empty() {
+            return Err(DesktopError::EmptyContactName);
+        }
+        let updated = runtime.conn.execute(
+            "UPDATE contacts SET display_name = ?1, updated_at_unix = ?2 WHERE id = ?3",
+            params![display_name, now_unix(), contact_id],
+        )?;
+        if updated == 0 {
+            return Err(DesktopError::ContactNotFound);
+        }
+        runtime.snapshot()
+    }
+
+    pub fn delete_contact(
+        data_dir: impl AsRef<Path>,
+        contact_id: &str,
+    ) -> Result<AppSnapshot, DesktopError> {
+        let runtime = Self::open(data_dir)?;
+        runtime.ensure_profile()?;
+        runtime.delete_contact_inner(contact_id)?;
+        runtime.snapshot()
+    }
+
+    pub fn import_sticker(
+        data_dir: impl AsRef<Path>,
+        file_path: &str,
+        display_name: &str,
+    ) -> Result<ImportStickerResponse, DesktopError> {
+        let runtime = Self::open(data_dir)?;
+        runtime.ensure_profile()?;
+        let sticker = runtime.import_sticker_inner(file_path, display_name)?;
+        Ok(ImportStickerResponse {
+            sticker,
+            snapshot: runtime.snapshot()?,
+        })
+    }
+
+    pub fn delete_sticker(
+        data_dir: impl AsRef<Path>,
+        sticker_id: &str,
+    ) -> Result<AppSnapshot, DesktopError> {
+        let runtime = Self::open(data_dir)?;
+        runtime.ensure_profile()?;
+        runtime.delete_sticker_inner(sticker_id)?;
         runtime.snapshot()
     }
 
@@ -573,6 +751,98 @@ impl DesktopRuntime {
             &storage_key,
         )?;
         runtime.snapshot()
+    }
+
+    pub async fn send_burn_message(
+        data_dir: impl AsRef<Path>,
+        thread_kind: &str,
+        thread_id: &str,
+        body: &str,
+    ) -> Result<AppSnapshot, DesktopError> {
+        if body.trim().is_empty() {
+            return Err(DesktopError::EmptyMessage);
+        }
+        let runtime = Self::open(data_dir)?;
+        let payload = encode_wire_content(&WireContent {
+            kind: "burn".to_string(),
+            text: Some(body.to_string()),
+            burn_id: Some(Uuid::new_v4().to_string()),
+            destroyed: Some(false),
+            target_burn_id: None,
+            attachment: None,
+            attachment_id: None,
+            file_name: None,
+            mime_type: None,
+            size_bytes: None,
+            sha256: None,
+            chunk_index: None,
+            total_chunks: None,
+            data_base64: None,
+        })?;
+        runtime
+            .send_thread_payload(
+                ThreadKind::from_str(thread_kind)
+                    .ok_or(DesktopError::InvalidData("invalid thread kind".to_string()))?,
+                thread_id,
+                &payload,
+                true,
+            )
+            .await?;
+        runtime.snapshot()
+    }
+
+    pub async fn open_burn_message(
+        data_dir: impl AsRef<Path>,
+        thread_kind: &str,
+        thread_id: &str,
+        message_id: &str,
+    ) -> Result<AppSnapshot, DesktopError> {
+        let runtime = Self::open(data_dir)?;
+        runtime.ensure_profile()?;
+        let kind = ThreadKind::from_str(thread_kind)
+            .ok_or_else(|| DesktopError::InvalidData("invalid thread kind".to_string()))?;
+        if let Some(burn_id) = runtime.destroy_local_burn_message(kind, message_id)? {
+            let payload = encode_wire_content(&WireContent {
+                kind: "destroy".to_string(),
+                text: None,
+                burn_id: None,
+                destroyed: None,
+                target_burn_id: Some(burn_id),
+                attachment: None,
+                attachment_id: None,
+                file_name: None,
+                mime_type: None,
+                size_bytes: None,
+                sha256: None,
+                chunk_index: None,
+                total_chunks: None,
+                data_base64: None,
+            })?;
+            runtime
+                .send_thread_payload(kind, thread_id, &payload, false)
+                .await?;
+        }
+        runtime.snapshot()
+    }
+
+    pub async fn send_attachment(
+        data_dir: impl AsRef<Path>,
+        thread_kind: &str,
+        thread_id: &str,
+        file_path: &str,
+        kind: &str,
+    ) -> Result<SendAttachmentResponse, DesktopError> {
+        let runtime = Self::open(data_dir)?;
+        runtime.ensure_profile()?;
+        let thread_kind = ThreadKind::from_str(thread_kind)
+            .ok_or_else(|| DesktopError::InvalidData("invalid thread kind".to_string()))?;
+        let attachment_id = runtime
+            .send_attachment_inner(thread_kind, thread_id, Path::new(file_path), kind)
+            .await?;
+        Ok(SendAttachmentResponse {
+            attachment_id,
+            snapshot: runtime.snapshot()?,
+        })
     }
 
     pub async fn create_group(
@@ -732,17 +1002,26 @@ impl DesktopRuntime {
                             })
                             .map(|member| member.display_name.as_str())
                             .unwrap_or("Group member");
-                        runtime.insert_group_message(
+                        if !runtime.handle_incoming_payload(
+                            ThreadKind::Group,
                             &envelope.group_id.to_string(),
-                            envelope.wire.sender_device_id,
-                            sender_display_name,
-                            MessageDirection::Incoming,
                             &plain.body,
-                            MessageStatus::Received,
-                            Some(item.ciphertext),
-                            Some(item.id.to_string()),
+                            Some(envelope.wire.sender_device_id),
+                            Some(sender_display_name),
                             &storage_key,
-                        )?;
+                        )? {
+                            runtime.insert_group_message(
+                                &envelope.group_id.to_string(),
+                                envelope.wire.sender_device_id,
+                                sender_display_name,
+                                MessageDirection::Incoming,
+                                &plain.body,
+                                MessageStatus::Received,
+                                Some(item.ciphertext),
+                                Some(item.id.to_string()),
+                                &storage_key,
+                            )?;
+                        }
                         if let (Some(sender_account_id), Some(sender_device_id)) =
                             (item.sender_account_id, item.sender_device_id)
                         {
@@ -810,7 +1089,16 @@ impl DesktopRuntime {
             }
             if let Some(contact) = contact {
                 runtime.save_session(&contact.id, &session)?;
-                if !handled_control {
+                if !handled_control
+                    && !runtime.handle_incoming_payload(
+                        ThreadKind::Contact,
+                        &contact.id,
+                        &plain.body,
+                        None,
+                        None,
+                        &storage_key,
+                    )?
+                {
                     runtime.insert_message(
                         &contact.id,
                         MessageDirection::Incoming,
@@ -831,7 +1119,16 @@ impl DesktopRuntime {
                 }
                 let connection = temporary_connection.ok_or(DesktopError::ContactNotFound)?;
                 runtime.save_temporary_session(&connection.id, &session)?;
-                if !handled_control {
+                if !handled_control
+                    && !runtime.handle_incoming_payload(
+                        ThreadKind::Temporary,
+                        &connection.id,
+                        &plain.body,
+                        None,
+                        None,
+                        &storage_key,
+                    )?
+                {
                     runtime.insert_temporary_message(
                         &connection.id,
                         MessageDirection::Incoming,
@@ -976,6 +1273,340 @@ impl DesktopRuntime {
         Ok((relay_ciphertext, sent.id.to_string()))
     }
 
+    async fn send_temporary_plaintext(
+        &self,
+        profile: &ProfileRow,
+        keys: &DeviceKeyMaterial,
+        connection: &TemporaryConnectionRecord,
+        body: &str,
+    ) -> Result<(Vec<u8>, String), DesktopError> {
+        if connection.expires_unix <= now_unix() {
+            self.delete_temporary_connection(&connection.id)?;
+            return Err(DesktopError::ExpiredInvite);
+        }
+        let relay = RelayClient::new(&profile.relay_url);
+        relay.register_device(keys).await?;
+        let mut session = self.load_temporary_session(connection)?;
+        let initial = if session.is_some() {
+            None
+        } else if let Some(invite_uri) = &connection.invite_uri {
+            let invite = Invite::from_uri(invite_uri)?;
+            validate_invite_for_local_device(&invite, keys)?;
+            let (initial, created_session) =
+                start_session_as_initiator(keys, &invite.bundle, CipherSuite::default())?;
+            session = Some(created_session);
+            Some(initial)
+        } else {
+            None
+        };
+        let mut session = session.ok_or(DesktopError::ContactNotFound)?;
+        let wire = session.encrypt(PlainMessage {
+            sent_at_unix: now_unix(),
+            body: body.to_string(),
+        })?;
+        let envelope = RelayEnvelope {
+            temporary: true,
+            initial,
+            wire,
+        };
+        let payload = serde_json::to_vec(&envelope)?;
+        let frame = TransportFrame::protect(&payload, &padding_profile(payload.len()))?;
+        let relay_ciphertext = serde_json::to_vec(&frame)?;
+        let sent = relay
+            .send(
+                keys,
+                SendRequest {
+                    sender_account_id: Some(keys.account_id),
+                    sender_device_id: Some(keys.device_id),
+                    to_account_id: session.remote_identity.account_id,
+                    to_device_id: session.remote_identity.device_id,
+                    transport_kind: TransportKind::WebSocketTls,
+                    sealed_sender: None,
+                    ciphertext: relay_ciphertext.clone(),
+                    expires_unix: Some(now_unix() + TEMP_MESSAGE_TTL_SECS),
+                    auth: None,
+                },
+            )
+            .await?;
+        self.save_temporary_session(&connection.id, &session)?;
+        Ok((relay_ciphertext, sent.id.to_string()))
+    }
+
+    async fn send_group_plaintext(
+        &self,
+        profile: &ProfileRow,
+        keys: &DeviceKeyMaterial,
+        group: &GroupState,
+        body: &str,
+    ) -> Result<(Vec<u8>, Option<String>), DesktopError> {
+        let relay = RelayClient::new(&profile.relay_url);
+        relay.register_device(keys).await?;
+        let wire = group.encrypt_message(
+            &keys.public_identity(),
+            GroupPlainMessage {
+                sent_at_unix: now_unix(),
+                body: body.to_string(),
+            },
+        )?;
+        let envelope = group.transport_envelope(wire);
+        let payload = serde_json::to_vec(&envelope)?;
+        let frame = TransportFrame::protect(&payload, &padding_profile(payload.len()))?;
+        let relay_ciphertext = serde_json::to_vec(&frame)?;
+        let mut remote_message_ids = Vec::new();
+        for member in &group.members {
+            if member.identity.device_id == keys.device_id {
+                continue;
+            }
+            let sent = relay
+                .send(
+                    keys,
+                    SendRequest {
+                        sender_account_id: Some(keys.account_id),
+                        sender_device_id: Some(keys.device_id),
+                        to_account_id: member.identity.account_id,
+                        to_device_id: member.identity.device_id,
+                        transport_kind: TransportKind::WebSocketTls,
+                        sealed_sender: None,
+                        ciphertext: relay_ciphertext.clone(),
+                        expires_unix: Some(now_unix() + 7 * 24 * 60 * 60),
+                        auth: None,
+                    },
+                )
+                .await?;
+            remote_message_ids.push(sent.id.to_string());
+        }
+        Ok((relay_ciphertext, remote_message_ids.first().cloned()))
+    }
+
+    async fn send_thread_payload(
+        &self,
+        thread_kind: ThreadKind,
+        thread_id: &str,
+        body: &str,
+        insert_visible: bool,
+    ) -> Result<(), DesktopError> {
+        let profile = self.ensure_profile()?;
+        let keys = self.load_device_keys()?;
+        let storage_key = self.load_storage_key()?;
+        match thread_kind {
+            ThreadKind::Contact => {
+                let contact = self
+                    .contact(thread_id)?
+                    .ok_or(DesktopError::ContactNotFound)?;
+                let (relay_ciphertext, remote_message_id) = self
+                    .send_contact_plaintext(
+                        &profile,
+                        &keys,
+                        &contact,
+                        body,
+                        Some(now_unix() + 7 * 24 * 60 * 60),
+                    )
+                    .await?;
+                if insert_visible {
+                    self.insert_message(
+                        thread_id,
+                        MessageDirection::Outgoing,
+                        body,
+                        MessageStatus::Sent,
+                        Some(relay_ciphertext),
+                        Some(remote_message_id),
+                        &storage_key,
+                    )?;
+                }
+            }
+            ThreadKind::Temporary => {
+                let connection = self
+                    .temporary_connection(thread_id)?
+                    .ok_or(DesktopError::ContactNotFound)?;
+                let (relay_ciphertext, remote_message_id) = self
+                    .send_temporary_plaintext(&profile, &keys, &connection, body)
+                    .await?;
+                if insert_visible {
+                    self.insert_temporary_message(
+                        thread_id,
+                        MessageDirection::Outgoing,
+                        body,
+                        MessageStatus::Sent,
+                        Some(relay_ciphertext),
+                        Some(remote_message_id),
+                        &storage_key,
+                    )?;
+                }
+            }
+            ThreadKind::Group => {
+                let group = self
+                    .load_group_state(thread_id, &storage_key)?
+                    .ok_or(DesktopError::GroupNotFound)?;
+                let (relay_ciphertext, remote_message_id) = self
+                    .send_group_plaintext(&profile, &keys, &group, body)
+                    .await?;
+                if insert_visible {
+                    self.insert_group_message(
+                        thread_id,
+                        keys.device_id,
+                        "You",
+                        MessageDirection::Outgoing,
+                        body,
+                        MessageStatus::Sent,
+                        Some(relay_ciphertext),
+                        remote_message_id,
+                        &storage_key,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_attachment_inner(
+        &self,
+        thread_kind: ThreadKind,
+        thread_id: &str,
+        source_path: &Path,
+        kind: &str,
+    ) -> Result<String, DesktopError> {
+        if !source_path.is_file() {
+            return Err(DesktopError::FileNotFound);
+        }
+        let metadata = fs::metadata(source_path)?;
+        let size_bytes = metadata.len();
+        let attachment_id = Uuid::new_v4().to_string();
+        let file_name = source_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(sanitize_file_name)
+            .unwrap_or_else(|| format!("attachment-{attachment_id}"));
+        let mime_type = guess_mime_type(&file_name);
+        let sha256 = sha256_file(source_path)?;
+        let total_chunks = size_bytes.max(1).div_ceil(ATTACHMENT_CHUNK_BYTES as u64);
+        let mut file = fs::File::open(source_path)?;
+        let mut buffer = vec![0u8; ATTACHMENT_CHUNK_BYTES];
+        let mut chunk_index = 0u64;
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 && chunk_index > 0 {
+                break;
+            }
+            let payload = encode_wire_content(&WireContent {
+                kind: normalize_attachment_kind(kind).to_string(),
+                text: None,
+                burn_id: None,
+                destroyed: None,
+                target_burn_id: None,
+                attachment: None,
+                attachment_id: Some(attachment_id.clone()),
+                file_name: Some(file_name.clone()),
+                mime_type: Some(mime_type.clone()),
+                size_bytes: Some(size_bytes),
+                sha256: Some(sha256.clone()),
+                chunk_index: Some(chunk_index),
+                total_chunks: Some(total_chunks),
+                data_base64: Some(STANDARD.encode(&buffer[..read])),
+            })?;
+            self.send_thread_payload(thread_kind, thread_id, &payload, false)
+                .await?;
+            chunk_index += 1;
+            if read == 0 || chunk_index >= total_chunks {
+                break;
+            }
+        }
+        let local_path = self.copy_attachment_file(&attachment_id, source_path, &file_name)?;
+        let attachment = AttachmentView {
+            id: attachment_id.clone(),
+            kind: normalize_attachment_kind(kind).to_string(),
+            file_name,
+            mime_type,
+            size_bytes,
+            sha256,
+            local_path: Some(local_path.to_string_lossy().to_string()),
+            transfer_status: "complete".to_string(),
+        };
+        self.record_attachment(thread_kind, thread_id, &attachment, "complete")?;
+        let body = encode_wire_content(&WireContent {
+            kind: attachment.kind.clone(),
+            text: None,
+            burn_id: None,
+            destroyed: None,
+            target_burn_id: None,
+            attachment: Some(attachment),
+            attachment_id: None,
+            file_name: None,
+            mime_type: None,
+            size_bytes: None,
+            sha256: None,
+            chunk_index: None,
+            total_chunks: None,
+            data_base64: None,
+        })?;
+        self.insert_local_thread_message(
+            thread_kind,
+            thread_id,
+            MessageDirection::Outgoing,
+            &body,
+        )?;
+        Ok(attachment_id)
+    }
+
+    fn insert_local_thread_message(
+        &self,
+        thread_kind: ThreadKind,
+        thread_id: &str,
+        direction: MessageDirection,
+        body: &str,
+    ) -> Result<(), DesktopError> {
+        let storage_key = self.load_storage_key()?;
+        match thread_kind {
+            ThreadKind::Contact => self.insert_message(
+                thread_id,
+                direction,
+                body,
+                if direction == MessageDirection::Incoming {
+                    MessageStatus::Received
+                } else {
+                    MessageStatus::Sent
+                },
+                None,
+                None,
+                &storage_key,
+            ),
+            ThreadKind::Temporary => self.insert_temporary_message(
+                thread_id,
+                direction,
+                body,
+                if direction == MessageDirection::Incoming {
+                    MessageStatus::Received
+                } else {
+                    MessageStatus::Sent
+                },
+                None,
+                None,
+                &storage_key,
+            ),
+            ThreadKind::Group => {
+                let keys = self.load_device_keys()?;
+                self.insert_group_message(
+                    thread_id,
+                    keys.device_id,
+                    if direction == MessageDirection::Outgoing {
+                        "You"
+                    } else {
+                        "Group member"
+                    },
+                    direction,
+                    body,
+                    if direction == MessageDirection::Incoming {
+                        MessageStatus::Received
+                    } else {
+                        MessageStatus::Sent
+                    },
+                    None,
+                    None,
+                    &storage_key,
+                )
+            }
+        }
+    }
+
     fn migrate(&self) -> Result<(), DesktopError> {
         self.conn.execute_batch(
             r#"
@@ -1075,17 +1706,94 @@ impl DesktopRuntime {
                 sent_at_unix INTEGER NOT NULL,
                 received_at_unix INTEGER
             );
+            CREATE TABLE IF NOT EXISTS attachments (
+                id TEXT PRIMARY KEY,
+                thread_kind TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                local_path TEXT,
+                status TEXT NOT NULL,
+                created_at_unix INTEGER NOT NULL,
+                updated_at_unix INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS attachment_chunks (
+                attachment_id TEXT NOT NULL,
+                thread_kind TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                total_chunks INTEGER NOT NULL,
+                chunk_path TEXT NOT NULL,
+                created_at_unix INTEGER NOT NULL,
+                PRIMARY KEY(attachment_id, chunk_index)
+            );
+            CREATE TABLE IF NOT EXISTS sticker_packs (
+                id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                created_at_unix INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS stickers (
+                id TEXT PRIMARY KEY,
+                pack_id TEXT,
+                display_name TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                local_path TEXT NOT NULL,
+                created_at_unix INTEGER NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_contacts_updated ON contacts(updated_at_unix DESC);
             CREATE INDEX IF NOT EXISTS idx_messages_contact_sent ON messages(contact_id, sent_at_unix DESC);
             CREATE INDEX IF NOT EXISTS idx_groups_updated ON groups(updated_at_unix DESC);
             CREATE INDEX IF NOT EXISTS idx_group_messages_group_sent ON group_messages(group_id, sent_at_unix DESC);
             CREATE INDEX IF NOT EXISTS idx_temporary_connections_updated ON temporary_connections(updated_at_unix DESC);
             CREATE INDEX IF NOT EXISTS idx_temporary_messages_connection_sent ON temporary_messages(connection_id, sent_at_unix DESC);
+            CREATE INDEX IF NOT EXISTS idx_attachments_thread ON attachments(thread_kind, thread_id, updated_at_unix DESC);
+            CREATE INDEX IF NOT EXISTS idx_attachment_chunks_thread ON attachment_chunks(thread_kind, thread_id, attachment_id);
+            CREATE INDEX IF NOT EXISTS idx_stickers_created ON stickers(created_at_unix DESC);
             "#,
         )?;
         self.ensure_sessions_schema()?;
+        self.ensure_message_content_columns()?;
         self.encrypt_existing_metadata_if_possible()?;
         self.delete_expired_temporary_connections()?;
+        Ok(())
+    }
+
+    fn ensure_message_content_columns(&self) -> Result<(), DesktopError> {
+        for table in ["messages", "group_messages", "temporary_messages"] {
+            self.ensure_column(table, "content_kind", "TEXT NOT NULL DEFAULT 'text'")?;
+            self.ensure_column(table, "attachment_id", "TEXT")?;
+            self.ensure_column(table, "burn_id", "TEXT")?;
+            self.ensure_column(table, "burn_destroyed", "INTEGER NOT NULL DEFAULT 0")?;
+        }
+        Ok(())
+    }
+
+    fn ensure_column(
+        &self,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> Result<(), DesktopError> {
+        let mut statement = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !columns.iter().any(|value| value == column) {
+            self.conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN {column} {definition};"
+            ))?;
+        }
         Ok(())
     }
 
@@ -1614,13 +2322,16 @@ impl DesktopRuntime {
                     sent_at,
                     received_at,
                 ) = result?;
-                let body = decrypt_body(storage_key, &nonce, &ciphertext)?;
+                let raw_body = decrypt_body(storage_key, &nonce, &ciphertext)?;
+                let content = message_content_view(&raw_body);
+                let body = message_display_text(&content);
                 Ok(GroupMessageView {
                     id,
                     group_id,
                     sender_display_name,
                     direction: MessageDirection::from_str(&direction),
                     body,
+                    content,
                     status: MessageStatus::from_str(&status),
                     sent_at_unix: sent_at as u64,
                     received_at_unix: received_at.map(|value| value as u64),
@@ -1701,12 +2412,15 @@ impl DesktopRuntime {
             .map(|result| {
                 let (id, contact_id, direction, nonce, ciphertext, status, sent_at, received_at) =
                     result?;
-                let body = decrypt_body(storage_key, &nonce, &ciphertext)?;
+                let raw_body = decrypt_body(storage_key, &nonce, &ciphertext)?;
+                let content = message_content_view(&raw_body);
+                let body = message_display_text(&content);
                 Ok(ChatMessageView {
                     id,
                     contact_id,
                     direction: MessageDirection::from_str(&direction),
                     body,
+                    content,
                     status: MessageStatus::from_str(&status),
                     sent_at_unix: sent_at as u64,
                     received_at_unix: received_at.map(|value| value as u64),
@@ -1757,12 +2471,15 @@ impl DesktopRuntime {
                         sent_at,
                         received_at,
                     ) = result?;
-                    let body = decrypt_body(storage_key, &nonce, &ciphertext)?;
+                    let raw_body = decrypt_body(storage_key, &nonce, &ciphertext)?;
+                    let content = message_content_view(&raw_body);
+                    let body = message_display_text(&content);
                     Ok(TemporaryMessageView {
                         id,
                         connection_id,
                         direction: MessageDirection::from_str(&direction),
                         body,
+                        content,
                         status: MessageStatus::from_str(&status),
                         sent_at_unix: sent_at as u64,
                         received_at_unix: received_at.map(|value| value as u64),
@@ -1785,8 +2502,11 @@ impl DesktopRuntime {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        row.map(|(nonce, ciphertext)| decrypt_body(storage_key, &nonce, &ciphertext))
-            .transpose()
+        row.map(|(nonce, ciphertext)| {
+            decrypt_body(storage_key, &nonce, &ciphertext)
+                .map(|body| message_display_text(&message_content_view(&body)))
+        })
+        .transpose()
     }
 
     fn last_group_message(
@@ -1802,8 +2522,11 @@ impl DesktopRuntime {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        row.map(|(nonce, ciphertext)| decrypt_body(storage_key, &nonce, &ciphertext))
-            .transpose()
+        row.map(|(nonce, ciphertext)| {
+            decrypt_body(storage_key, &nonce, &ciphertext)
+                .map(|body| message_display_text(&message_content_view(&body)))
+        })
+        .transpose()
     }
 
     fn last_temporary_message(
@@ -1819,8 +2542,11 @@ impl DesktopRuntime {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        row.map(|(nonce, ciphertext)| decrypt_body(storage_key, &nonce, &ciphertext))
-            .transpose()
+        row.map(|(nonce, ciphertext)| {
+            decrypt_body(storage_key, &nonce, &ciphertext)
+                .map(|body| message_display_text(&message_content_view(&body)))
+        })
+        .transpose()
     }
 
     fn load_group_state(
@@ -2154,6 +2880,7 @@ impl DesktopRuntime {
     }
 
     fn delete_temporary_connection(&self, connection_id: &str) -> Result<(), DesktopError> {
+        self.delete_thread_attachments(ThreadKind::Temporary, connection_id)?;
         self.conn.execute(
             "DELETE FROM temporary_messages WHERE connection_id = ?1",
             params![connection_id],
@@ -2213,6 +2940,552 @@ impl DesktopRuntime {
                )",
             params![connection_id, MAX_TEMP_MESSAGES_PER_CONNECTION as i64],
         )?;
+        Ok(())
+    }
+
+    fn handle_incoming_payload(
+        &self,
+        thread_kind: ThreadKind,
+        thread_id: &str,
+        body: &str,
+        sender_device_id: Option<Uuid>,
+        sender_display_name: Option<&str>,
+        storage_key: &Key32,
+    ) -> Result<bool, DesktopError> {
+        let Some(content) = decode_wire_content(body)? else {
+            return Ok(false);
+        };
+        if content.data_base64.is_some() && content.chunk_index.is_some() {
+            self.store_attachment_chunk(thread_kind, thread_id, &content)?;
+            if let Some(attachment) = self.try_complete_attachment(&content)? {
+                let visible_body = encode_wire_content(&WireContent {
+                    kind: attachment.kind.clone(),
+                    text: None,
+                    burn_id: None,
+                    destroyed: None,
+                    target_burn_id: None,
+                    attachment: Some(attachment.clone()),
+                    attachment_id: None,
+                    file_name: None,
+                    mime_type: None,
+                    size_bytes: None,
+                    sha256: None,
+                    chunk_index: None,
+                    total_chunks: None,
+                    data_base64: None,
+                })?;
+                self.record_attachment(thread_kind, thread_id, &attachment, "complete")?;
+                match thread_kind {
+                    ThreadKind::Contact => self.insert_message(
+                        thread_id,
+                        MessageDirection::Incoming,
+                        &visible_body,
+                        MessageStatus::Received,
+                        None,
+                        None,
+                        storage_key,
+                    )?,
+                    ThreadKind::Temporary => self.insert_temporary_message(
+                        thread_id,
+                        MessageDirection::Incoming,
+                        &visible_body,
+                        MessageStatus::Received,
+                        None,
+                        None,
+                        storage_key,
+                    )?,
+                    ThreadKind::Group => self.insert_group_message(
+                        thread_id,
+                        sender_device_id.unwrap_or_else(Uuid::nil),
+                        sender_display_name.unwrap_or("Group member"),
+                        MessageDirection::Incoming,
+                        &visible_body,
+                        MessageStatus::Received,
+                        None,
+                        None,
+                        storage_key,
+                    )?,
+                }
+            }
+            Ok(true)
+        } else {
+            match content.kind.as_str() {
+                "destroy" => {
+                    if let Some(burn_id) = content.target_burn_id.as_deref() {
+                        self.destroy_burn_by_burn_id(thread_kind, burn_id)?;
+                    }
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
+    }
+
+    fn store_attachment_chunk(
+        &self,
+        thread_kind: ThreadKind,
+        thread_id: &str,
+        content: &WireContent,
+    ) -> Result<(), DesktopError> {
+        let attachment_id = content
+            .attachment_id
+            .as_deref()
+            .ok_or_else(|| DesktopError::InvalidData("missing attachment id".to_string()))?;
+        let chunk_index = content
+            .chunk_index
+            .ok_or_else(|| DesktopError::InvalidData("missing chunk index".to_string()))?;
+        let data = content
+            .data_base64
+            .as_deref()
+            .ok_or_else(|| DesktopError::InvalidData("missing chunk data".to_string()))
+            .and_then(|value| {
+                STANDARD
+                    .decode(value)
+                    .map_err(|err| DesktopError::InvalidData(err.to_string()))
+            })?;
+        let dir = self.incoming_chunks_dir(attachment_id)?;
+        let chunk_path = dir.join(format!("{chunk_index:08}.chunk"));
+        fs::write(&chunk_path, data)?;
+        let now = now_unix();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO attachment_chunks
+             (attachment_id, thread_kind, thread_id, kind, file_name, mime_type, size_bytes, sha256, chunk_index, total_chunks, chunk_path, created_at_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                attachment_id,
+                thread_kind.as_str(),
+                thread_id,
+                normalize_attachment_kind(content.kind.as_str()),
+                sanitize_file_name(content.file_name.as_deref().unwrap_or("attachment")),
+                content.mime_type.as_deref().unwrap_or("application/octet-stream"),
+                content.size_bytes.unwrap_or_default() as i64,
+                content.sha256.as_deref().unwrap_or_default(),
+                chunk_index as i64,
+                content.total_chunks.unwrap_or(1) as i64,
+                chunk_path.to_string_lossy().to_string(),
+                now as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn try_complete_attachment(
+        &self,
+        content: &WireContent,
+    ) -> Result<Option<AttachmentView>, DesktopError> {
+        let attachment_id = content
+            .attachment_id
+            .as_deref()
+            .ok_or_else(|| DesktopError::InvalidData("missing attachment id".to_string()))?;
+        if self.conn.query_row(
+            "SELECT COUNT(*) FROM attachments WHERE id = ?1",
+            params![attachment_id],
+            |row| row.get::<_, i64>(0),
+        )? > 0
+        {
+            return Ok(None);
+        }
+        let total_chunks = content.total_chunks.unwrap_or(1);
+        let received: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM attachment_chunks WHERE attachment_id = ?1",
+            params![attachment_id],
+            |row| row.get(0),
+        )?;
+        if received < total_chunks as i64 {
+            return Ok(None);
+        }
+        let mut statement = self.conn.prepare(
+            "SELECT chunk_path FROM attachment_chunks WHERE attachment_id = ?1 ORDER BY chunk_index ASC",
+        )?;
+        let chunk_paths = statement
+            .query_map(params![attachment_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let file_name = sanitize_file_name(content.file_name.as_deref().unwrap_or("attachment"));
+        let final_path = self.attachment_file_path(attachment_id, &file_name)?;
+        let mut out = fs::File::create(&final_path)?;
+        for chunk_path in &chunk_paths {
+            let mut chunk = fs::File::open(chunk_path)?;
+            std::io::copy(&mut chunk, &mut out)?;
+        }
+        out.flush()?;
+        let actual_sha256 = sha256_file(&final_path)?;
+        let expected_sha256 = content.sha256.clone().unwrap_or_default();
+        if !expected_sha256.is_empty() && actual_sha256 != expected_sha256 {
+            let _ = fs::remove_file(&final_path);
+            return Err(DesktopError::InvalidData(
+                "attachment checksum mismatch".to_string(),
+            ));
+        }
+        self.conn.execute(
+            "DELETE FROM attachment_chunks WHERE attachment_id = ?1",
+            params![attachment_id],
+        )?;
+        let _ = fs::remove_dir_all(self.incoming_chunks_dir_path(attachment_id));
+        Ok(Some(AttachmentView {
+            id: attachment_id.to_string(),
+            kind: normalize_attachment_kind(content.kind.as_str()).to_string(),
+            file_name,
+            mime_type: content
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
+            size_bytes: content.size_bytes.unwrap_or_default(),
+            sha256: actual_sha256,
+            local_path: Some(final_path.to_string_lossy().to_string()),
+            transfer_status: "complete".to_string(),
+        }))
+    }
+
+    fn record_attachment(
+        &self,
+        thread_kind: ThreadKind,
+        thread_id: &str,
+        attachment: &AttachmentView,
+        status: &str,
+    ) -> Result<(), DesktopError> {
+        let now = now_unix();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO attachments
+             (id, thread_kind, thread_id, kind, file_name, mime_type, size_bytes, sha256, local_path, status, created_at_unix, updated_at_unix)
+             VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                COALESCE((SELECT created_at_unix FROM attachments WHERE id = ?1), ?11),
+                ?11
+             )",
+            params![
+                attachment.id.as_str(),
+                thread_kind.as_str(),
+                thread_id,
+                attachment.kind.as_str(),
+                attachment.file_name.as_str(),
+                attachment.mime_type.as_str(),
+                attachment.size_bytes as i64,
+                attachment.sha256.as_str(),
+                attachment.local_path.as_deref(),
+                status,
+                now as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn sticker_items(&self) -> Result<Vec<StickerItemView>, DesktopError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, display_name, file_name, mime_type, size_bytes, sha256, local_path, created_at_unix
+             FROM stickers ORDER BY created_at_unix DESC, display_name ASC",
+        )?;
+        let stickers = statement
+            .query_map([], |row| {
+                Ok(StickerItemView {
+                    id: row.get(0)?,
+                    display_name: row.get(1)?,
+                    file_name: row.get(2)?,
+                    mime_type: row.get(3)?,
+                    size_bytes: row.get::<_, i64>(4)? as u64,
+                    sha256: row.get(5)?,
+                    local_path: row.get(6)?,
+                    created_at_unix: row.get::<_, i64>(7)? as u64,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DesktopError::from)?;
+        Ok(stickers)
+    }
+
+    fn attachment_transfers(&self) -> Result<Vec<AttachmentTransferView>, DesktopError> {
+        let mut statement = self.conn.prepare(
+            "SELECT attachment_id, thread_kind, thread_id, kind, file_name, mime_type, size_bytes, sha256,
+                    COUNT(*), MAX(total_chunks)
+             FROM attachment_chunks
+             GROUP BY attachment_id, thread_kind, thread_id, kind, file_name, mime_type, size_bytes, sha256
+             ORDER BY MAX(created_at_unix) DESC",
+        )?;
+        let transfers = statement
+            .query_map([], |row| {
+                Ok(AttachmentTransferView {
+                    id: row.get(0)?,
+                    thread_kind: row.get(1)?,
+                    thread_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    file_name: row.get(4)?,
+                    mime_type: row.get(5)?,
+                    size_bytes: row.get::<_, i64>(6)? as u64,
+                    sha256: row.get(7)?,
+                    received_chunks: row.get::<_, i64>(8)? as u64,
+                    total_chunks: row.get::<_, i64>(9)? as u64,
+                    status: "receiving".to_string(),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DesktopError::from)?;
+        Ok(transfers)
+    }
+
+    fn import_sticker_inner(
+        &self,
+        file_path: &str,
+        display_name: &str,
+    ) -> Result<StickerItemView, DesktopError> {
+        let source = Path::new(file_path);
+        if !source.is_file() {
+            return Err(DesktopError::FileNotFound);
+        }
+        let id = Uuid::new_v4().to_string();
+        let file_name = source
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(sanitize_file_name)
+            .unwrap_or_else(|| format!("sticker-{id}"));
+        let display_name = {
+            let trimmed = display_name.trim();
+            if trimmed.is_empty() {
+                file_name.clone()
+            } else {
+                trimmed.to_string()
+            }
+        };
+        let mime_type = guess_mime_type(&file_name);
+        let size_bytes = fs::metadata(source)?.len();
+        let sha256 = sha256_file(source)?;
+        let target = self.sticker_file_path(&id, &file_name)?;
+        fs::copy(source, &target)?;
+        let now = now_unix();
+        let sticker = StickerItemView {
+            id,
+            display_name,
+            file_name,
+            mime_type,
+            size_bytes,
+            sha256,
+            local_path: target.to_string_lossy().to_string(),
+            created_at_unix: now,
+        };
+        self.conn.execute(
+            "INSERT INTO stickers(id, pack_id, display_name, file_name, mime_type, size_bytes, sha256, local_path, created_at_unix)
+             VALUES (?1, NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                sticker.id.as_str(),
+                sticker.display_name.as_str(),
+                sticker.file_name.as_str(),
+                sticker.mime_type.as_str(),
+                sticker.size_bytes as i64,
+                sticker.sha256.as_str(),
+                sticker.local_path.as_str(),
+                now as i64,
+            ],
+        )?;
+        Ok(sticker)
+    }
+
+    fn delete_sticker_inner(&self, sticker_id: &str) -> Result<(), DesktopError> {
+        let path: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT local_path FROM stickers WHERE id = ?1",
+                params![sticker_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(path) = path {
+            let _ = fs::remove_file(path);
+        }
+        self.conn
+            .execute("DELETE FROM stickers WHERE id = ?1", params![sticker_id])?;
+        Ok(())
+    }
+
+    fn delete_contact_inner(&self, contact_id: &str) -> Result<(), DesktopError> {
+        let exists: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM contacts WHERE id = ?1",
+                params![contact_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(DesktopError::ContactNotFound);
+        }
+        self.delete_thread_attachments(ThreadKind::Contact, contact_id)?;
+        self.conn.execute(
+            "DELETE FROM messages WHERE contact_id = ?1",
+            params![contact_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM sessions WHERE contact_id = ?1",
+            params![contact_id],
+        )?;
+        self.conn
+            .execute("DELETE FROM contacts WHERE id = ?1", params![contact_id])?;
+        Ok(())
+    }
+
+    fn delete_thread_attachments(
+        &self,
+        thread_kind: ThreadKind,
+        thread_id: &str,
+    ) -> Result<(), DesktopError> {
+        let paths = {
+            let mut statement = self.conn.prepare(
+                "SELECT local_path FROM attachments WHERE thread_kind = ?1 AND thread_id = ?2 AND local_path IS NOT NULL",
+            )?;
+            let paths = statement
+                .query_map(params![thread_kind.as_str(), thread_id], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            paths
+        };
+        for path in paths {
+            let _ = fs::remove_file(path);
+        }
+        self.conn.execute(
+            "DELETE FROM attachments WHERE thread_kind = ?1 AND thread_id = ?2",
+            params![thread_kind.as_str(), thread_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM attachment_chunks WHERE thread_kind = ?1 AND thread_id = ?2",
+            params![thread_kind.as_str(), thread_id],
+        )?;
+        Ok(())
+    }
+
+    fn copy_attachment_file(
+        &self,
+        attachment_id: &str,
+        source_path: &Path,
+        file_name: &str,
+    ) -> Result<PathBuf, DesktopError> {
+        let target = self.attachment_file_path(attachment_id, file_name)?;
+        fs::copy(source_path, &target)?;
+        Ok(target)
+    }
+
+    fn attachment_file_path(
+        &self,
+        attachment_id: &str,
+        file_name: &str,
+    ) -> Result<PathBuf, DesktopError> {
+        let dir = self.attachments_dir().join(attachment_id);
+        fs::create_dir_all(&dir)?;
+        Ok(dir.join(sanitize_file_name(file_name)))
+    }
+
+    fn sticker_file_path(
+        &self,
+        sticker_id: &str,
+        file_name: &str,
+    ) -> Result<PathBuf, DesktopError> {
+        let dir = self.data_dir.join("stickers");
+        fs::create_dir_all(&dir)?;
+        Ok(dir.join(format!("{sticker_id}-{}", sanitize_file_name(file_name))))
+    }
+
+    fn incoming_chunks_dir(&self, attachment_id: &str) -> Result<PathBuf, DesktopError> {
+        let dir = self.incoming_chunks_dir_path(attachment_id);
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    fn incoming_chunks_dir_path(&self, attachment_id: &str) -> PathBuf {
+        self.data_dir.join("attachment-chunks").join(attachment_id)
+    }
+
+    fn attachments_dir(&self) -> PathBuf {
+        self.data_dir.join("attachments")
+    }
+
+    fn destroy_local_burn_message(
+        &self,
+        thread_kind: ThreadKind,
+        message_id: &str,
+    ) -> Result<Option<String>, DesktopError> {
+        let storage_key = self.load_storage_key()?;
+        let table = match thread_kind {
+            ThreadKind::Contact => "messages",
+            ThreadKind::Group => "group_messages",
+            ThreadKind::Temporary => "temporary_messages",
+        };
+        let row: Option<(Vec<u8>, Vec<u8>)> = self
+            .conn
+            .query_row(
+                &format!("SELECT body_nonce, body_ciphertext FROM {table} WHERE id = ?1"),
+                params![message_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((nonce, ciphertext)) = row else {
+            return Ok(None);
+        };
+        let body = decrypt_body(&storage_key, &nonce, &ciphertext)?;
+        let Some(mut content) = decode_wire_content(&body)? else {
+            return Ok(None);
+        };
+        if content.kind != "burn" {
+            return Ok(None);
+        }
+        let burn_id = content.burn_id.clone();
+        content.text = None;
+        content.destroyed = Some(true);
+        let destroyed_body = encode_wire_content(&content)?;
+        let (new_nonce, new_ciphertext) = encrypt_body(&storage_key, &destroyed_body)?;
+        self.conn.execute(
+            &format!(
+                "UPDATE {table}
+                 SET body_nonce = ?1, body_ciphertext = ?2, burn_destroyed = 1
+                 WHERE id = ?3"
+            ),
+            params![new_nonce.to_vec(), new_ciphertext, message_id],
+        )?;
+        Ok(burn_id)
+    }
+
+    fn destroy_burn_by_burn_id(
+        &self,
+        thread_kind: ThreadKind,
+        burn_id: &str,
+    ) -> Result<(), DesktopError> {
+        let storage_key = self.load_storage_key()?;
+        let table = match thread_kind {
+            ThreadKind::Contact => "messages",
+            ThreadKind::Group => "group_messages",
+            ThreadKind::Temporary => "temporary_messages",
+        };
+        let rows = {
+            let mut statement = self.conn.prepare(&format!(
+                "SELECT id, body_nonce, body_ciphertext FROM {table}"
+            ))?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (message_id, nonce, ciphertext) in rows {
+            let body = decrypt_body(&storage_key, &nonce, &ciphertext)?;
+            let Some(mut content) = decode_wire_content(&body)? else {
+                continue;
+            };
+            if content.kind == "burn" && content.burn_id.as_deref() == Some(burn_id) {
+                content.text = None;
+                content.destroyed = Some(true);
+                let destroyed_body = encode_wire_content(&content)?;
+                let (new_nonce, new_ciphertext) = encrypt_body(&storage_key, &destroyed_body)?;
+                self.conn.execute(
+                    &format!(
+                        "UPDATE {table}
+                         SET body_nonce = ?1, body_ciphertext = ?2, burn_destroyed = 1
+                         WHERE id = ?3"
+                    ),
+                    params![new_nonce.to_vec(), new_ciphertext, message_id],
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -2348,6 +3621,155 @@ impl DesktopRuntime {
 struct ProfileRow {
     display_name: String,
     relay_url: String,
+}
+
+fn encode_wire_content(content: &WireContent) -> Result<String, DesktopError> {
+    Ok(format!(
+        "{CONTENT_PREFIX}{}",
+        STANDARD.encode(serde_json::to_vec(content)?)
+    ))
+}
+
+fn decode_wire_content(body: &str) -> Result<Option<WireContent>, DesktopError> {
+    let Some(encoded) = body.strip_prefix(CONTENT_PREFIX) else {
+        return Ok(None);
+    };
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|err| DesktopError::InvalidData(err.to_string()))?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(DesktopError::from)
+}
+
+fn message_content_view(body: &str) -> MessageContentView {
+    match decode_wire_content(body) {
+        Ok(Some(content)) => match content.kind.as_str() {
+            "burn" => MessageContentView {
+                kind: "burn".to_string(),
+                text: content.text,
+                burn_id: content.burn_id,
+                destroyed: content.destroyed.unwrap_or(false),
+                attachment: content.attachment,
+            },
+            "image" | "file" | "sticker" => MessageContentView {
+                kind: content.kind,
+                text: content.text,
+                burn_id: content.burn_id,
+                destroyed: content.destroyed.unwrap_or(false),
+                attachment: content.attachment,
+            },
+            "destroy" => MessageContentView {
+                kind: "destroyed".to_string(),
+                text: None,
+                burn_id: content.target_burn_id,
+                destroyed: true,
+                attachment: None,
+            },
+            _ => MessageContentView {
+                kind: "text".to_string(),
+                text: content.text,
+                burn_id: None,
+                destroyed: false,
+                attachment: None,
+            },
+        },
+        _ => MessageContentView {
+            kind: "text".to_string(),
+            text: Some(body.to_string()),
+            burn_id: None,
+            destroyed: false,
+            attachment: None,
+        },
+    }
+}
+
+fn message_display_text(content: &MessageContentView) -> String {
+    match content.kind.as_str() {
+        "burn" if content.destroyed => "Burned message".to_string(),
+        "burn" => "Burn after reading".to_string(),
+        "image" => content
+            .attachment
+            .as_ref()
+            .map(|attachment| format!("Image: {}", attachment.file_name))
+            .unwrap_or_else(|| "Image".to_string()),
+        "sticker" => content
+            .attachment
+            .as_ref()
+            .map(|attachment| format!("Sticker: {}", attachment.file_name))
+            .unwrap_or_else(|| "Sticker".to_string()),
+        "file" => content
+            .attachment
+            .as_ref()
+            .map(|attachment| format!("File: {}", attachment.file_name))
+            .unwrap_or_else(|| "File".to_string()),
+        "destroyed" => "Burned message".to_string(),
+        _ => content.text.clone().unwrap_or_default(),
+    }
+}
+
+fn normalize_attachment_kind(kind: &str) -> &'static str {
+    match kind {
+        "image" => "image",
+        "sticker" => "sticker",
+        _ => "file",
+    }
+}
+
+fn sanitize_file_name(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            character if character.is_control() => '_',
+            character => character,
+        })
+        .collect::<String>()
+        .trim()
+        .trim_matches('.')
+        .to_string();
+    if sanitized.is_empty() {
+        "attachment".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn guess_mime_type(file_name: &str) -> String {
+    let lower = file_name.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".heic") || lower.ends_with(".heif") {
+        "image/heic"
+    } else if lower.ends_with(".pdf") {
+        "application/pdf"
+    } else if lower.ends_with(".txt") {
+        "text/plain"
+    } else {
+        "application/octet-stream"
+    }
+    .to_string()
+}
+
+fn sha256_file(path: &Path) -> Result<String, DesktopError> {
+    let mut hasher = Sha256::new();
+    let mut file = fs::File::open(path)?;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    Ok(to_hex(digest.as_slice()))
 }
 
 fn encrypt_body(storage_key: &Key32, body: &str) -> Result<([u8; 12], Vec<u8>), DesktopError> {
@@ -2597,6 +4019,131 @@ mod tests {
             alice_report.snapshot.temporary_messages[0].body,
             "temporary hello"
         );
+
+        handle.abort();
+        let _ = fs::remove_dir_all(alice_dir);
+        let _ = fs::remove_dir_all(bob_dir);
+    }
+
+    #[tokio::test]
+    async fn rich_content_features_round_trip_and_contact_delete_cleans_chat() {
+        let (addr, handle) = secure_chat_relay::spawn_ephemeral().await.unwrap();
+        let relay_url = format!("http://{addr}");
+        let alice_dir = test_data_dir("alice-rich-content");
+        let bob_dir = test_data_dir("bob-rich-content");
+
+        DesktopRuntime::bootstrap(&alice_dir, "Alice", &relay_url)
+            .await
+            .unwrap();
+        DesktopRuntime::bootstrap(&bob_dir, "Bob", &relay_url)
+            .await
+            .unwrap();
+
+        let alice_invite = DesktopRuntime::invite(&alice_dir).unwrap().invite_uri;
+        let bob_snapshot = DesktopRuntime::add_contact(&bob_dir, "Alice", &alice_invite).unwrap();
+        let alice_contact_id_for_bob = bob_snapshot.contacts[0].id.clone();
+        let renamed = DesktopRuntime::update_contact_display_name(
+            &bob_dir,
+            &alice_contact_id_for_bob,
+            "Alice 🔐",
+        )
+        .unwrap();
+        assert_eq!(renamed.contacts[0].display_name, "Alice 🔐");
+
+        let image_path = bob_dir.join("wave-image.png");
+        fs::write(&image_path, b"not-a-real-png-but-still-private-bytes").unwrap();
+        let sticker =
+            DesktopRuntime::import_sticker(&bob_dir, image_path.to_str().unwrap(), "Wave 👋")
+                .unwrap();
+        assert_eq!(sticker.snapshot.stickers.len(), 1);
+
+        DesktopRuntime::send_message(&bob_dir, &alice_contact_id_for_bob, "hello 😀")
+            .await
+            .unwrap();
+        DesktopRuntime::send_attachment(
+            &bob_dir,
+            "contact",
+            &alice_contact_id_for_bob,
+            image_path.to_str().unwrap(),
+            "image",
+        )
+        .await
+        .unwrap();
+        DesktopRuntime::send_attachment(
+            &bob_dir,
+            "contact",
+            &alice_contact_id_for_bob,
+            &sticker.sticker.local_path,
+            "sticker",
+        )
+        .await
+        .unwrap();
+        DesktopRuntime::send_burn_message(
+            &bob_dir,
+            "contact",
+            &alice_contact_id_for_bob,
+            "secret once",
+        )
+        .await
+        .unwrap();
+
+        let alice_report = DesktopRuntime::receive(&alice_dir).await.unwrap();
+        assert_eq!(alice_report.snapshot.contacts.len(), 1);
+        assert!(alice_report
+            .snapshot
+            .messages
+            .iter()
+            .any(|message| message.body == "hello 😀"));
+
+        let received_image = alice_report
+            .snapshot
+            .messages
+            .iter()
+            .find(|message| message.content.kind == "image")
+            .and_then(|message| message.content.attachment.as_ref())
+            .expect("image attachment should be visible after reassembly");
+        let received_image_path = received_image.local_path.as_ref().unwrap();
+        assert_eq!(
+            fs::read(received_image_path).unwrap(),
+            b"not-a-real-png-but-still-private-bytes"
+        );
+        assert!(alice_report
+            .snapshot
+            .messages
+            .iter()
+            .any(|message| message.content.kind == "sticker"));
+        let burn_message = alice_report
+            .snapshot
+            .messages
+            .iter()
+            .find(|message| message.content.kind == "burn")
+            .expect("burn message should be received");
+        assert_eq!(burn_message.content.text.as_deref(), Some("secret once"));
+
+        let alice_contact_id_for_alice = alice_report.snapshot.contacts[0].id.clone();
+        let opened = DesktopRuntime::open_burn_message(
+            &alice_dir,
+            "contact",
+            &alice_contact_id_for_alice,
+            &burn_message.id,
+        )
+        .await
+        .unwrap();
+        assert!(opened
+            .messages
+            .iter()
+            .any(|message| message.id == burn_message.id && message.content.destroyed));
+
+        let bob_destroy_report = DesktopRuntime::receive(&bob_dir).await.unwrap();
+        assert!(bob_destroy_report
+            .snapshot
+            .messages
+            .iter()
+            .any(|message| message.content.kind == "burn" && message.content.destroyed));
+
+        let deleted = DesktopRuntime::delete_contact(&bob_dir, &alice_contact_id_for_bob).unwrap();
+        assert!(deleted.contacts.is_empty());
+        assert!(deleted.messages.is_empty());
 
         handle.abort();
         let _ = fs::remove_dir_all(alice_dir);

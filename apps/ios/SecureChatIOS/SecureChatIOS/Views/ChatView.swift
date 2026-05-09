@@ -1,9 +1,14 @@
 import SwiftUI
+import PhotosUI
+import UIKit
+import UniformTypeIdentifiers
 
 struct ChatView: View {
     @EnvironmentObject private var store: SecureChatStore
     let contact: AppContact
     @State private var draft = ""
+    @State private var showingEditContact = false
+    @State private var showingDeleteContact = false
 
     var messages: [AppChatMessage] {
         store.appSnapshot?.messages.filter { $0.contactId == contact.id } ?? []
@@ -13,29 +18,23 @@ struct ChatView: View {
         VStack(spacing: 0) {
             SafetyBanner(contact: contact)
             Divider()
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 10) {
-                        ForEach(messages) { message in
-                            MessageBubble(
-                                direction: message.direction,
-                                messageBody: message.body,
-                                status: message.status,
-                                sentAtUnix: message.sentAtUnix,
-                                receivedAtUnix: message.receivedAtUnix,
-                                showsStatus: store.showMessageStatus,
-                                showsTimestamp: store.showMessageTimestamps
-                            )
-                                .id(message.id)
-                        }
-                    }
-                    .padding(14)
-                }
-                .onChange(of: messages.count) { _ in
-                    if let last = messages.last {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
-                }
+            SmartMessageScrollView(
+                threadID: contact.id,
+                messages: messages,
+                isOutgoing: { $0.direction == .outgoing }
+            ) { message in
+                MessageBubble(
+                    messageID: message.id,
+                    direction: message.direction,
+                    messageBody: message.body,
+                    content: message.content,
+                    status: message.status,
+                    sentAtUnix: message.sentAtUnix,
+                    receivedAtUnix: message.receivedAtUnix,
+                    showsStatus: store.showMessageStatus,
+                    showsTimestamp: store.showMessageTimestamps,
+                    openBurn: { Task { await store.openBurnMessage(messageID: message.id) } }
+                )
             }
             Divider()
             ComposerView(draft: $draft) {
@@ -49,14 +48,42 @@ struct ChatView: View {
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button {
+                    showingEditContact = true
+                } label: {
+                    Image(systemName: "pencil")
+                }
+
+                Button(role: .destructive) {
+                    showingDeleteContact = true
+                } label: {
+                    Image(systemName: "trash")
+                }
+
+                Button {
                     Task { await store.receiveMessages() }
                 } label: {
                     Image(systemName: "tray.and.arrow.down")
                 }
             }
         }
+        .sheet(isPresented: $showingEditContact) {
+            EditContactSheet(contact: contact)
+                .environmentObject(store)
+        }
+        .confirmationDialog(
+            "Delete this contact and local chat history?",
+            isPresented: $showingDeleteContact,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Contact", role: .destructive) {
+                Task { await store.deleteContact(contactID: contact.id) }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
         .onAppear {
             store.selectedContactID = contact.id
+            store.selectedGroupID = nil
+            store.selectedTemporaryConnectionID = nil
         }
     }
 }
@@ -79,29 +106,23 @@ struct TemporaryChatView: View {
         VStack(spacing: 0) {
             TemporarySafetyBanner(connection: currentConnection)
             Divider()
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 10) {
-                        ForEach(messages) { message in
-                            MessageBubble(
-                                direction: message.direction,
-                                messageBody: message.body,
-                                status: message.status,
-                                sentAtUnix: message.sentAtUnix,
-                                receivedAtUnix: message.receivedAtUnix,
-                                showsStatus: store.showMessageStatus,
-                                showsTimestamp: store.showMessageTimestamps
-                            )
-                            .id(message.id)
-                        }
-                    }
-                    .padding(14)
-                }
-                .onChange(of: messages.count) { _ in
-                    if let last = messages.last {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
-                }
+            SmartMessageScrollView(
+                threadID: connection.id,
+                messages: messages,
+                isOutgoing: { $0.direction == .outgoing }
+            ) { message in
+                MessageBubble(
+                    messageID: message.id,
+                    direction: message.direction,
+                    messageBody: message.body,
+                    content: message.content,
+                    status: message.status,
+                    sentAtUnix: message.sentAtUnix,
+                    receivedAtUnix: message.receivedAtUnix,
+                    showsStatus: store.showMessageStatus,
+                    showsTimestamp: store.showMessageTimestamps,
+                    openBurn: { Task { await store.openBurnMessage(messageID: message.id) } }
+                )
             }
             Divider()
             ComposerView(draft: $draft) {
@@ -132,6 +153,7 @@ struct TemporaryChatView: View {
         }
         .onAppear {
             store.selectedContactID = nil
+            store.selectedGroupID = nil
             store.selectedTemporaryConnectionID = connection.id
         }
     }
@@ -154,35 +176,29 @@ struct GroupChatView: View {
         VStack(spacing: 0) {
             GroupBanner(group: currentGroup)
             Divider()
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 10) {
-                        ForEach(messages) { message in
-                            VStack(alignment: message.direction == .outgoing ? .trailing : .leading, spacing: 4) {
-                                if message.direction == .incoming {
-                                    Text(message.senderDisplayName)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                MessageBubble(
-                                    direction: message.direction,
-                                    messageBody: message.body,
-                                    status: message.status,
-                                    sentAtUnix: message.sentAtUnix,
-                                    receivedAtUnix: message.receivedAtUnix,
-                                    showsStatus: store.showMessageStatus,
-                                    showsTimestamp: store.showMessageTimestamps
-                                )
-                            }
-                            .id(message.id)
-                        }
+            SmartMessageScrollView(
+                threadID: group.id,
+                messages: messages,
+                isOutgoing: { $0.direction == .outgoing }
+            ) { message in
+                VStack(alignment: message.direction == .outgoing ? .trailing : .leading, spacing: 4) {
+                    if message.direction == .incoming {
+                        Text(message.senderDisplayName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    .padding(14)
-                }
-                .onChange(of: messages.count) { _ in
-                    if let last = messages.last {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
+                    MessageBubble(
+                        messageID: message.id,
+                        direction: message.direction,
+                        messageBody: message.body,
+                        content: message.content,
+                        status: message.status,
+                        sentAtUnix: message.sentAtUnix,
+                        receivedAtUnix: message.receivedAtUnix,
+                        showsStatus: store.showMessageStatus,
+                        showsTimestamp: store.showMessageTimestamps,
+                        openBurn: { Task { await store.openBurnMessage(messageID: message.id) } }
+                    )
                 }
             }
             Divider()
@@ -212,8 +228,149 @@ struct GroupChatView: View {
         }
         .onAppear {
             store.selectedGroupID = group.id
+            store.selectedContactID = nil
             store.selectedTemporaryConnectionID = nil
         }
+    }
+}
+
+private struct SmartMessageScrollView<Message: Identifiable, RowContent: View>: View where Message.ID: Hashable {
+    let threadID: String
+    let messages: [Message]
+    let isOutgoing: (Message) -> Bool
+    @ViewBuilder let rowContent: (Message) -> RowContent
+
+    @State private var viewportHeight: CGFloat = 0
+    @State private var bottomY: CGFloat = 0
+    @State private var isPinnedToBottom = true
+    @State private var hasNewMessages = false
+    @State private var lastSignature = ""
+
+    private let bottomID = "message-bottom-sentinel"
+    private let coordinateSpace = "smart-message-scroll"
+    private let bottomThreshold: CGFloat = 80
+
+    private var signature: String {
+        "\(messages.count)-\(String(describing: messages.last?.id))"
+    }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ZStack(alignment: .bottom) {
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        ForEach(messages) { message in
+                            rowContent(message)
+                                .id(message.id)
+                        }
+                        Color.clear
+                            .frame(height: 1)
+                            .id(bottomID)
+                            .background(
+                                GeometryReader { geometry in
+                                    Color.clear.preference(
+                                        key: MessageBottomOffsetPreferenceKey.self,
+                                        value: geometry.frame(in: .named(coordinateSpace)).maxY
+                                    )
+                                }
+                            )
+                    }
+                    .padding(14)
+                }
+                .coordinateSpace(name: coordinateSpace)
+                .background(
+                    GeometryReader { geometry in
+                        Color.clear.preference(
+                            key: MessageViewportHeightPreferenceKey.self,
+                            value: geometry.size.height
+                        )
+                    }
+                )
+                .onPreferenceChange(MessageViewportHeightPreferenceKey.self) { height in
+                    viewportHeight = height
+                    updatePinnedState()
+                }
+                .onPreferenceChange(MessageBottomOffsetPreferenceKey.self) { offset in
+                    bottomY = offset
+                    updatePinnedState()
+                }
+                .onAppear {
+                    resetThread(proxy)
+                }
+                .onChange(of: threadID) { _ in
+                    resetThread(proxy)
+                }
+                .onChange(of: signature) { newSignature in
+                    guard newSignature != lastSignature else { return }
+                    defer { lastSignature = newSignature }
+                    guard let lastMessage = messages.last else {
+                        hasNewMessages = false
+                        return
+                    }
+                    if isPinnedToBottom || isOutgoing(lastMessage) {
+                        scrollToBottom(proxy, animated: true)
+                        hasNewMessages = false
+                    } else {
+                        hasNewMessages = true
+                    }
+                }
+
+                if hasNewMessages && !isPinnedToBottom {
+                    Button {
+                        scrollToBottom(proxy, animated: true)
+                        hasNewMessages = false
+                    } label: {
+                        Label("New Messages", systemImage: "arrow.down.circle.fill")
+                    }
+                    .font(.footnote.weight(.semibold))
+                    .buttonStyle(.borderedProminent)
+                    .padding(.bottom, 10)
+                }
+            }
+        }
+    }
+
+    private func updatePinnedState() {
+        let pinned = bottomY <= viewportHeight + bottomThreshold
+        isPinnedToBottom = pinned
+        if pinned {
+            hasNewMessages = false
+        }
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
+        DispatchQueue.main.async {
+            if animated {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo(bottomID, anchor: .bottom)
+                }
+            } else {
+                proxy.scrollTo(bottomID, anchor: .bottom)
+            }
+        }
+    }
+
+    private func resetThread(_ proxy: ScrollViewProxy) {
+        lastSignature = signature
+        hasNewMessages = false
+        isPinnedToBottom = true
+        scrollToBottom(proxy, animated: false)
+    }
+}
+
+private struct MessageViewportHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct MessageBottomOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
@@ -299,13 +456,17 @@ private struct TemporarySafetyBanner: View {
 }
 
 private struct MessageBubble: View {
+    let messageID: String
     let direction: AppMessageDirection
     let messageBody: String
+    let content: MessageContent
     let status: AppMessageStatus
     let sentAtUnix: UInt64
     let receivedAtUnix: UInt64?
     let showsStatus: Bool
     let showsTimestamp: Bool
+    let openBurn: () -> Void
+    @State private var showingBurn = false
 
     private var isOutgoing: Bool {
         direction == .outgoing
@@ -315,8 +476,7 @@ private struct MessageBubble: View {
         HStack {
             if isOutgoing { Spacer(minLength: 44) }
             VStack(alignment: .leading, spacing: 5) {
-                Text(messageBody)
-                    .textSelection(.enabled)
+                contentView
                 if showsStatus || showsTimestamp {
                     HStack(spacing: 6) {
                         if showsStatus {
@@ -338,6 +498,38 @@ private struct MessageBubble: View {
             )
             if !isOutgoing { Spacer(minLength: 44) }
         }
+        .alert("Burn After Reading", isPresented: $showingBurn) {
+            Button("Destroy", role: .destructive) {
+                openBurn()
+            }
+        } message: {
+            Text(content.text ?? "")
+        }
+    }
+
+    @ViewBuilder
+    private var contentView: some View {
+        switch content.kind {
+        case "burn":
+            if content.destroyed {
+                Label("Burned message", systemImage: "flame")
+                    .foregroundStyle(.secondary)
+            } else {
+                Button {
+                    showingBurn = true
+                } label: {
+                    Label("Open burn after reading", systemImage: "flame.fill")
+                }
+                .buttonStyle(.bordered)
+            }
+        case "image", "sticker":
+            AttachmentPreview(attachment: content.attachment, compact: content.kind == "sticker")
+        case "file":
+            FileAttachmentView(attachment: content.attachment)
+        default:
+            Text(content.text ?? messageBody)
+                .textSelection(.enabled)
+        }
     }
 
     private var messageTime: String {
@@ -354,14 +546,63 @@ private struct MessageBubble: View {
 }
 
 private struct ComposerView: View {
+    @EnvironmentObject private var store: SecureChatStore
     @Binding var draft: String
     let send: () -> Void
+    @State private var importerKind = "file"
+    @State private var showingImporter = false
+    @State private var selectedPhotoItem: PhotosPickerItem?
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 10) {
+            Menu {
+                Button {
+                    importerKind = "file"
+                    showingImporter = true
+                } label: {
+                    Label("Send File", systemImage: "paperclip")
+                }
+                Button {
+                    importerKind = "image"
+                    showingImporter = true
+                } label: {
+                    Label("Send Image", systemImage: "photo")
+                }
+                Divider()
+                ForEach(store.appSnapshot?.stickers ?? []) { sticker in
+                    Button(sticker.displayName) {
+                        Task { await store.sendSticker(sticker) }
+                    }
+                }
+                Button {
+                    importerKind = "sticker"
+                    showingImporter = true
+                } label: {
+                    Label("Import Sticker", systemImage: "face.smiling")
+                }
+            } label: {
+                Image(systemName: "plus.circle.fill")
+                    .frame(width: 34, height: 34)
+            }
+
+            PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                Image(systemName: "photo.on.rectangle")
+                    .frame(width: 34, height: 34)
+            }
+
             TextField("Message", text: $draft, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(1...5)
+            Button {
+                let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                draft = ""
+                Task { await store.sendBurnMessage(text) }
+            } label: {
+                Image(systemName: "flame.fill")
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.bordered)
+            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             Button(action: send) {
                 Image(systemName: "paperplane.fill")
                     .frame(width: 34, height: 34)
@@ -371,5 +612,120 @@ private struct ComposerView: View {
         }
         .padding(12)
         .background(.bar)
+        .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
+            guard let url = try? result.get().first else { return }
+            Task {
+                if importerKind == "sticker" {
+                    await store.importSticker(fileURL: url)
+                } else {
+                    await store.sendAttachment(fileURL: url, kind: importerKind)
+                }
+            }
+        }
+        .onChange(of: selectedPhotoItem) { item in
+            guard let item else { return }
+            Task {
+                defer { selectedPhotoItem = nil }
+                guard let data = try? await item.loadTransferable(type: Data.self) else { return }
+                let fileExtension = item.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg"
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension(fileExtension)
+                do {
+                    try data.write(to: url, options: [.atomic])
+                    await store.sendAttachment(fileURL: url, kind: "image")
+                } catch {
+                }
+            }
+        }
     }
+}
+
+private struct AttachmentPreview: View {
+    let attachment: AttachmentContent?
+    let compact: Bool
+
+    var body: some View {
+        if let attachment {
+            VStack(alignment: .leading, spacing: 6) {
+                if let path = attachment.localPath,
+                   let image = UIImage(contentsOfFile: path) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: compact ? 128 : 260, maxHeight: compact ? 128 : 220)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                Text(attachment.fileName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        } else {
+            Label("Image", systemImage: "photo")
+        }
+    }
+}
+
+private struct FileAttachmentView: View {
+    let attachment: AttachmentContent?
+
+    var body: some View {
+        if let attachment {
+            HStack(spacing: 10) {
+                Image(systemName: "doc.fill")
+                    .font(.title3)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(attachment.fileName)
+                        .lineLimit(1)
+                    Text(byteCount(attachment.sizeBytes))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let path = attachment.localPath {
+                    ShareLink(item: URL(fileURLWithPath: path)) {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                }
+            }
+        } else {
+            Label("File", systemImage: "doc")
+        }
+    }
+}
+
+private struct EditContactSheet: View {
+    @EnvironmentObject private var store: SecureChatStore
+    @Environment(\.dismiss) private var dismiss
+    let contact: AppContact
+    @State private var displayName = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                TextField("Nickname", text: $displayName)
+            }
+            .navigationTitle("Edit Nickname")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        Task {
+                            await store.updateContactDisplayName(contactID: contact.id, displayName: name)
+                            dismiss()
+                        }
+                    }
+                    .disabled(displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+        .onAppear { displayName = contact.displayName }
+    }
+}
+
+private func byteCount(_ bytes: UInt64) -> String {
+    ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
 }

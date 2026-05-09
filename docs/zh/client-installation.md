@@ -32,7 +32,7 @@ https://github.com/ninjaz0/secure-chat/releases/latest
 适用于 Mac 用户。
 
 1. 打开最新版 Release 页面。
-2. 下载 `SecureChatMac-版本号.dmg`，例如 `SecureChatMac-0.2.4.dmg`。
+2. 下载 `SecureChatMac-版本号.dmg`，例如 `SecureChatMac-0.2.5.dmg`。
 3. 双击打开 DMG。
 4. 把 `SecureChatMac.app` 拖到 `Applications` / `应用程序` 文件夹。
 5. 打开 `应用程序`，启动 `SecureChatMac`。
@@ -51,7 +51,7 @@ https://github.com/ninjaz0/secure-chat/releases/latest
 适用于 Android 手机或平板。
 
 1. 打开最新版 Release 页面。
-2. 下载 `SecureChatAndroid-版本号.apk`，例如 `SecureChatAndroid-0.2.4.apk`。
+2. 下载 `SecureChatAndroid-版本号.apk`，例如 `SecureChatAndroid-0.2.5.apk`。
 3. 在手机上打开下载完成的 APK。
 4. 如果系统提示“禁止安装未知应用”，进入提示页，允许当前浏览器或文件管理器安装未知应用。
 5. 回到安装界面，点击 `安装`。
@@ -112,6 +112,21 @@ docs/zh/ios-client.md
 8. Bob 打开客户端后会自动收取；也可以点击刷新或 Receive 按钮手动收取。
 
 为了确认没有加错人，建议双方通过电话、当面或可信视频通话比对安全码。安全码一致后，说明双方当前设备身份匹配。
+
+## 发送更多类型的消息
+
+v0.2.5 起，macOS、iOS 和 Android 的聊天页都支持：
+
+- 文本和 Unicode emoji。
+- 图片消息和普通文件消息。
+- 本地导入表情图片/GIF，并在聊天中作为表情发送。
+- 阅后即焚消息：打开后本机立即隐藏内容，并尽力向对方发送销毁通知。
+
+如果你正在聊天底部，新消息会自动滚到最新；如果你正在回看历史，新消息不会打断当前位置，会出现一个可点击的新消息提示。
+
+## 联系人昵称和删除
+
+联系人详情或更多菜单里可以编辑昵称，也可以删除联系人。删除是本地强删除，会清理该联系人、1 对 1 消息、会话密钥和相关未完成附件；不会删除对方设备上的历史。
 
 ## 临时聊天
 
