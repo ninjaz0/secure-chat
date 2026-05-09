@@ -339,8 +339,7 @@ impl DesktopRuntime {
             });
         };
         let keys = self.load_device_keys()?;
-        let invite_uri =
-            Invite::new(keys.pre_key_bundle(), Some(profile.relay_url.clone()), None).to_uri()?;
+        let invite_uri = Invite::new(&keys, Some(profile.relay_url.clone()), None)?.to_uri()?;
         let storage_key = self.load_storage_key()?;
         let contacts = self.contact_summaries(&storage_key)?;
         let messages = self.message_views(&storage_key)?;
@@ -387,8 +386,7 @@ impl DesktopRuntime {
         let profile = runtime.ensure_profile()?;
         let keys = runtime.load_device_keys()?;
         Ok(InviteResponse {
-            invite_uri: Invite::new(keys.pre_key_bundle(), Some(profile.relay_url), None)
-                .to_uri()?,
+            invite_uri: Invite::new(&keys, Some(profile.relay_url), None)?.to_uri()?,
         })
     }
 
@@ -400,12 +398,8 @@ impl DesktopRuntime {
         let keys = runtime.load_device_keys()?;
         let expires_unix = now_unix() + TEMP_INVITE_TTL_SECS;
         Ok(TemporaryInviteResponse {
-            invite_uri: Invite::temporary(
-                keys.pre_key_bundle(),
-                Some(profile.relay_url),
-                Some(expires_unix),
-            )
-            .to_uri()?,
+            invite_uri: Invite::temporary(&keys, Some(profile.relay_url), Some(expires_unix))?
+                .to_uri()?,
             expires_unix,
         })
     }

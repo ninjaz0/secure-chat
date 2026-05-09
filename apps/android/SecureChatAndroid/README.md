@@ -16,6 +16,11 @@ From the repository root:
 ./script/build_android.sh debug
 ```
 
-The script builds `libsecure_chat_ffi.so` for `arm64-v8a` and `x86_64`, copies them into `app/src/main/jniLibs`, then runs the Android Gradle build.
+The script builds `libsecure_chat_ffi.so` for `arm64-v8a`, `armeabi-v7a`,
+`x86`, and `x86_64`, copies them into `app/src/main/jniLibs`, verifies the
+pinned Gradle distribution checksum when it has to download Gradle, then runs
+the Android Gradle build.
 
-The app stores Rust runtime secrets in Android app-private no-backup storage and disables Android cloud backup in the manifest.
+The app stores Rust runtime secrets in Android app-private no-backup storage and
+excludes the app-private files, databases, shared preferences, and external
+state from Android cloud backup and device-transfer extraction rules.

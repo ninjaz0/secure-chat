@@ -9,6 +9,7 @@ CARGO_BIN="${CARGO:-$HOME/.cargo/bin/cargo}"
 RUSTUP_BIN="${RUSTUP:-$HOME/.cargo/bin/rustup}"
 ANDROID_API="${ANDROID_API:-26}"
 GRADLE_VERSION="${GRADLE_VERSION:-8.10.2}"
+GRADLE_SHA256="${GRADLE_SHA256:-31c55713e40233a8303827ceb42ca48a47267a0ad4bab9177123121e71524c26}"
 
 case "$MODE" in
   debug)
@@ -75,6 +76,19 @@ find_ndk_toolchain() {
   return 1
 }
 
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+    return
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+    return
+  fi
+  echo "neither shasum nor sha256sum is available for checksum verification" >&2
+  return 1
+}
+
 gradle_cmd() {
   if [[ -n "${GRADLE:-}" ]]; then
     echo "$GRADLE"
@@ -89,6 +103,13 @@ gradle_cmd() {
   if [[ ! -x "$gradle_dir/bin/gradle" ]]; then
     mkdir -p "$ROOT_DIR/dist/gradle"
     curl -L "https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip" -o "$gradle_zip"
+    actual_sha256="$(sha256_file "$gradle_zip")"
+    if [[ "$actual_sha256" != "$GRADLE_SHA256" ]]; then
+      echo "Gradle distribution checksum mismatch for $gradle_zip" >&2
+      echo "expected: $GRADLE_SHA256" >&2
+      echo "actual:   $actual_sha256" >&2
+      exit 1
+    fi
     unzip -q "$gradle_zip" -d "$ROOT_DIR/dist/gradle"
   fi
   echo "$gradle_dir/bin/gradle"
@@ -155,12 +176,48 @@ mkdir -p "$JNI_LIBS_DIR"
 
 for target in "${TARGETS[@]}"; do
   abi="$(abi_for_target "$target")"
-  "$CARGO_BIN" build -p secure-chat-ffi --target "$target" $CARGO_PROFILE_ARG
+  "$CARGO_BIN" build --locked -p secure-chat-ffi --target "$target" $CARGO_PROFILE_ARG
   mkdir -p "$JNI_LIBS_DIR/$abi"
   cp "$ROOT_DIR/target/$target/$CARGO_PROFILE_DIR/libsecure_chat_ffi.so" "$JNI_LIBS_DIR/$abi/"
 done
 
 GRADLE_BIN="$(gradle_cmd)"
 (cd "$ANDROID_APP_DIR" && "$GRADLE_BIN" "$GRADLE_TASK")
+
+if [[ "$MODE" == "release" || "$MODE" == "--release" ]]; then
+  APK_DIR="$ANDROID_APP_DIR/app/build/outputs/apk/release"
+  SIGNED_APK="$APK_DIR/app-release.apk"
+  UNSIGNED_APK="$APK_DIR/app-release-unsigned.apk"
+  APK_TO_CHECK=""
+  if [[ -f "$SIGNED_APK" ]]; then
+    APK_TO_CHECK="$SIGNED_APK"
+  elif [[ -f "$UNSIGNED_APK" ]]; then
+    APK_TO_CHECK="$UNSIGNED_APK"
+  fi
+
+  if [[ "${SECURE_CHAT_REQUIRE_RELEASE_SIGNING:-0}" == "1" && ! -f "$SIGNED_APK" ]]; then
+    echo "release signing is required but Gradle did not produce app-release.apk" >&2
+    echo "Set SECURE_CHAT_ANDROID_KEYSTORE, SECURE_CHAT_ANDROID_KEYSTORE_PASSWORD, SECURE_CHAT_ANDROID_KEY_ALIAS, and SECURE_CHAT_ANDROID_KEY_PASSWORD." >&2
+    exit 1
+  fi
+
+  if [[ -n "$APK_TO_CHECK" ]]; then
+    APKSIGNER=""
+    if command -v apksigner >/dev/null 2>&1; then
+      APKSIGNER="$(command -v apksigner)"
+    else
+      APKSIGNER="$(find "$SDK_DIR/build-tools" -path '*/apksigner' -type f 2>/dev/null | sort | tail -1 || true)"
+    fi
+
+    if [[ -n "$APKSIGNER" && -f "$SIGNED_APK" ]]; then
+      signer_output="$("$APKSIGNER" verify --verbose --print-certs "$SIGNED_APK")"
+      printf '%s\n' "$signer_output"
+      if printf '%s\n' "$signer_output" | grep -q 'CN=Android Debug'; then
+        echo "refusing Android release signed with the debug certificate" >&2
+        exit 1
+      fi
+    fi
+  fi
+fi
 
 echo "Android APK built under $ANDROID_APP_DIR/app/build/outputs/apk/$MODE"

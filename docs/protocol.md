@@ -119,8 +119,8 @@ quickly so stale NAT mappings are not reused for long.
 The client SDK uses the relay as an opaque delivery queue:
 
 1. Each device uploads its signed public pre-key bundle.
-2. The sender imports an invite, verifies the bundle signatures, and creates an
-   X3DH-style initial message.
+2. The sender imports an invite, verifies the invite metadata signature and the
+   bundle signatures, and creates an X3DH-style initial message.
 3. The sender encrypts the plaintext with its Double Ratchet session.
 4. The client wraps `{ initial, wire }` into a relay envelope, then pads it as a
    `TransportFrame`.
@@ -149,8 +149,9 @@ request signatures:
 
 The signed payload binds the action name, canonical request digest, account ID,
 device ID, issued timestamp, and a 128-bit nonce. The relay enforces a five
-minute timestamp skew window and keeps an in-memory nonce replay cache per
-device. Public pre-key lookup remains unauthenticated so invite-based session
+minute timestamp skew window and keeps a per-device nonce replay cache in memory
+and in SQLite for persistent relays, so a restart does not reopen the timestamp
+window. Public pre-key lookup remains unauthenticated so invite-based session
 setup can fetch recipient bundles.
 
 ## Relay Persistence

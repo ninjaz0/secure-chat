@@ -64,9 +64,24 @@ Create a local macOS release DMG:
 ./script/package_macos.sh
 ```
 
-The generated DMG is written to `dist/SecureChatMac-0.2.0.dmg`. It is ad-hoc
-signed for local testing unless you replace the signing step with a Developer ID
-certificate and notarization flow.
+The generated DMG is written to `dist/SecureChatMac-0.2.4.dmg`. It is ad-hoc
+signed for local testing by default. For release gates, set
+`SECURE_CHAT_MACOS_SIGN_IDENTITY` to a Developer ID identity and
+`SECURE_CHAT_RELEASE_STRICT=1`; the script then rejects ad-hoc signing and runs
+Gatekeeper assessment.
+
+Build an Android release APK:
+
+```bash
+./script/build_android.sh release
+```
+
+Set `SECURE_CHAT_ANDROID_KEYSTORE`,
+`SECURE_CHAT_ANDROID_KEYSTORE_PASSWORD`, `SECURE_CHAT_ANDROID_KEY_ALIAS`, and
+`SECURE_CHAT_ANDROID_KEY_PASSWORD` to produce a signed release APK. Set
+`SECURE_CHAT_REQUIRE_RELEASE_SIGNING=1` in release automation so unsigned or
+debug-signed APKs cannot be shipped. If the script has to download Gradle, it
+verifies the pinned SHA-256 checksum before unzipping it.
 
 Run the Rust test suite:
 
@@ -127,8 +142,12 @@ For server deployment and user-facing setup:
   - no domain, use the server public IP: `./deploy/install-relay.sh --email you@example.com`
   - with a domain: `./deploy/install-relay.sh --domain chat.example.com --email you@example.com`
 - Server maintenance command after install: `chatrelay`
+- Relay installs and `chatrelay update` build with `cargo --locked` and write
+  `/etc/secure-chat/build-info.txt` with git revision, `Cargo.lock` hash,
+  binary hash, and Rust toolchain versions.
 - English relay deployment: [docs/deploy-relay.md](docs/deploy-relay.md)
 - 中文公共服务器部署指南：[docs/zh/public-server-deployment.md](docs/zh/public-server-deployment.md)
+- 中文客户端安装与首次使用说明：[docs/zh/client-installation.md](docs/zh/client-installation.md)
 - 中文客户端使用教程：[docs/zh/usage-guide.md](docs/zh/usage-guide.md)
 - 中文 iOS 构建与互联教程：[docs/zh/ios-client.md](docs/zh/ios-client.md)
 - Production environment example: [deploy/relay.env.example](deploy/relay.env.example)
@@ -223,5 +242,7 @@ Plaintext stays inside the endpoint runtimes.
 - Real iPhone/iPad installation requires setting an Apple development team and
   bundle identifier in the iOS Xcode project.
 - The relay has durable SQLite queues, but it is not horizontally replicated.
+- Current invite links sign the full invite metadata. Older
+  unsigned invite links are rejected and should be regenerated.
 - The cryptographic design and implementation still need third-party audit
   before public security claims.

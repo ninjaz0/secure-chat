@@ -29,6 +29,7 @@ use uuid::Uuid;
 
 const MAX_TOTAL_DEVICES: usize = 100_000;
 const MAX_DEVICES_PER_ACCOUNT: usize = 16;
+const MAX_REGISTRATIONS_PER_MINUTE: usize = 120;
 const MAX_QUEUE_MESSAGES_PER_DEVICE: usize = 1_024;
 const MAX_RECEIPTS_PER_DEVICE: usize = 2_048;
 const MAX_AUTH_NONCES_PER_DEVICE: usize = 2_048;
@@ -56,6 +57,7 @@ struct RelayState {
     apns_tokens: HashMap<DeviceId, Vec<ApnsTokenRecord>>,
     peer_links: HashSet<DevicePair>,
     receipt_grants: HashMap<Uuid, ReceiptGrant>,
+    registration_attempts: VecDeque<u64>,
 }
 
 #[derive(Clone)]
@@ -513,6 +515,7 @@ async fn register_device_inner(
         let mut signed_request = request.clone();
         signed_request.auth = None;
         verify_relay_auth(
+            state.db_path(),
             &mut inner,
             account_id,
             device_id,
@@ -521,6 +524,9 @@ async fn register_device_inner(
             &signed_request,
             request.auth.as_ref(),
         )?;
+        if !device_exists(&inner, account_id, device_id) {
+            enforce_registration_rate(&mut inner)?;
+        }
         enforce_device_limits(&inner, account_id, device_id)?;
     }
     persist_device(state.db_path(), account_id, device_id, &request.bundle).map_err(|err| {
@@ -584,6 +590,7 @@ async fn register_apns_token_inner(
     let device_public = device_signing_public(&inner, request.account_id, request.device_id)
         .ok_or(StatusCode::UNAUTHORIZED)?;
     verify_relay_auth(
+        state.db_path(),
         &mut inner,
         request.account_id,
         request.device_id,
@@ -624,6 +631,7 @@ async fn delete_apns_token_inner(
     let device_public = device_signing_public(&inner, request.account_id, request.device_id)
         .ok_or(StatusCode::UNAUTHORIZED)?;
     verify_relay_auth(
+        state.db_path(),
         &mut inner,
         request.account_id,
         request.device_id,
@@ -674,6 +682,7 @@ async fn publish_mls_key_package_inner(
     let device_public = device_signing_public(&inner, request.account_id, request.device_id)
         .ok_or(StatusCode::UNAUTHORIZED)?;
     verify_relay_auth(
+        state.db_path(),
         &mut inner,
         request.account_id,
         request.device_id,
@@ -719,6 +728,7 @@ async fn claim_mls_key_package_inner(
     )
     .ok_or(StatusCode::UNAUTHORIZED)?;
     verify_relay_auth(
+        state.db_path(),
         &mut inner,
         request.requester_account_id,
         request.requester_device_id,
@@ -734,6 +744,14 @@ async fn claim_mls_key_package_inner(
         .is_some();
     if !exists {
         return Err(StatusCode::NOT_FOUND);
+    }
+    if request.requester_device_id != request.target_device_id
+        && !inner.peer_links.contains(&DevicePair::new(
+            request.requester_device_id,
+            request.target_device_id,
+        ))
+    {
+        return Err(StatusCode::FORBIDDEN);
     }
     let key_package = inner.mls_key_packages.remove(&request.target_device_id);
     if key_package.is_some() {
@@ -768,6 +786,7 @@ async fn publish_p2p_candidates_inner(
     let device_public = device_signing_public(&inner, request.account_id, request.device_id)
         .ok_or(StatusCode::UNAUTHORIZED)?;
     verify_relay_auth(
+        state.db_path(),
         &mut inner,
         request.account_id,
         request.device_id,
@@ -802,6 +821,7 @@ async fn list_p2p_candidates_inner(
     )
     .ok_or(StatusCode::UNAUTHORIZED)?;
     verify_relay_auth(
+        state.db_path(),
         &mut inner,
         request.requester_account_id,
         request.requester_device_id,
@@ -841,6 +861,7 @@ async fn handle_p2p_probe(
     let device_public = device_signing_public(&inner, request.account_id, request.device_id)
         .ok_or(StatusCode::UNAUTHORIZED)?;
     verify_relay_auth(
+        state.db_path(),
         &mut inner,
         request.account_id,
         request.device_id,
@@ -884,6 +905,7 @@ async fn send_message_inner(
     let sender_public = device_signing_public(&inner, sender_account_id, sender_device_id)
         .ok_or(StatusCode::UNAUTHORIZED)?;
     verify_relay_auth(
+        state.db_path(),
         &mut inner,
         sender_account_id,
         sender_device_id,
@@ -982,6 +1004,7 @@ async fn drain_messages_inner(
     let device_public = device_signing_public(&inner, request.account_id, request.device_id)
         .ok_or(StatusCode::UNAUTHORIZED)?;
     verify_relay_auth(
+        state.db_path(),
         &mut inner,
         request.account_id,
         request.device_id,
@@ -1072,6 +1095,7 @@ async fn send_receipt_inner(
         device_signing_public(&inner, request.from_account_id, request.from_device_id)
             .ok_or(StatusCode::UNAUTHORIZED)?;
     verify_relay_auth(
+        state.db_path(),
         &mut inner,
         request.from_account_id,
         request.from_device_id,
@@ -1129,6 +1153,7 @@ async fn drain_receipts_inner(
     let device_public = device_signing_public(&inner, request.account_id, request.device_id)
         .ok_or(StatusCode::UNAUTHORIZED)?;
     verify_relay_auth(
+        state.db_path(),
         &mut inner,
         request.account_id,
         request.device_id,
@@ -1165,6 +1190,7 @@ fn device_signing_public(
 }
 
 fn verify_relay_auth<T: serde::Serialize>(
+    db_path: Option<&Path>,
     inner: &mut RelayState,
     account_id: AccountId,
     device_id: DeviceId,
@@ -1180,18 +1206,51 @@ fn verify_relay_auth<T: serde::Serialize>(
     let now = now_unix();
     verify_relay_auth_for_request(device_signing_public, action, unsigned_request, auth, now)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    prune_expired_auth_nonces(db_path, now).map_err(|err| {
+        tracing::error!(%err, "prune auth nonces failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let nonces = inner.auth_nonces.entry(device_id).or_default();
     nonces.retain(|record| record.issued_unix + secure_chat_core::RELAY_AUTH_MAX_SKEW_SECS >= now);
     if nonces.iter().any(|record| record.nonce == auth.nonce) {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    nonces.push_back(AuthNonceRecord {
+    let record = AuthNonceRecord {
         issued_unix: auth.issued_unix,
         nonce: auth.nonce,
-    });
+    };
+    persist_auth_nonce(db_path, device_id, &record).map_err(|err| {
+        tracing::error!(%err, "persist auth nonce failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    nonces.push_back(record);
     while nonces.len() > MAX_AUTH_NONCES_PER_DEVICE {
-        nonces.pop_front();
+        if let Some(old) = nonces.pop_front() {
+            if let Err(err) = delete_auth_nonce(db_path, device_id, &old.nonce) {
+                tracing::warn!(%err, "delete old auth nonce failed");
+            }
+        }
     }
+    Ok(())
+}
+
+fn device_exists(inner: &RelayState, account_id: AccountId, device_id: DeviceId) -> bool {
+    inner
+        .devices
+        .get(&account_id)
+        .and_then(|devices| devices.get(&device_id))
+        .is_some()
+}
+
+fn enforce_registration_rate(inner: &mut RelayState) -> Result<(), StatusCode> {
+    let now = now_unix();
+    inner
+        .registration_attempts
+        .retain(|issued| *issued + 60 >= now);
+    if inner.registration_attempts.len() >= MAX_REGISTRATIONS_PER_MINUTE {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    inner.registration_attempts.push_back(now);
     Ok(())
 }
 
@@ -1419,14 +1478,21 @@ fn init_relay_db(path: &Path) -> rusqlite::Result<()> {
             created_unix INTEGER NOT NULL,
             PRIMARY KEY(left_device_id, right_device_id)
         );
-        CREATE TABLE IF NOT EXISTS receipt_grants (
-            message_id TEXT NOT NULL PRIMARY KEY,
-            grant_json TEXT NOT NULL,
-            expires_unix INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_receipt_grants_expires ON receipt_grants(expires_unix);
-        "#,
-    )?;
+	        CREATE TABLE IF NOT EXISTS receipt_grants (
+	            message_id TEXT NOT NULL PRIMARY KEY,
+	            grant_json TEXT NOT NULL,
+	            expires_unix INTEGER NOT NULL
+	        );
+	        CREATE INDEX IF NOT EXISTS idx_receipt_grants_expires ON receipt_grants(expires_unix);
+	        CREATE TABLE IF NOT EXISTS auth_nonces (
+	            device_id TEXT NOT NULL,
+	            nonce BLOB NOT NULL,
+	            issued_unix INTEGER NOT NULL,
+	            PRIMARY KEY(device_id, nonce)
+	        );
+	        CREATE INDEX IF NOT EXISTS idx_auth_nonces_issued ON auth_nonces(issued_unix);
+	        "#,
+	    )?;
     conn.execute(
         "DELETE FROM messages WHERE expires_unix IS NOT NULL AND expires_unix < ?1",
         params![now_unix() as i64],
@@ -1439,6 +1505,7 @@ fn init_relay_db(path: &Path) -> rusqlite::Result<()> {
         "DELETE FROM receipt_grants WHERE expires_unix < ?1",
         params![now_unix() as i64],
     )?;
+    prune_expired_auth_nonces(Some(path), now_unix())?;
     Ok(())
 }
 
@@ -1555,6 +1622,32 @@ fn load_relay_state(path: &Path) -> rusqlite::Result<RelayState> {
         state
             .receipt_grants
             .insert(parse_uuid(&message_id)?, parse_json(&json)?);
+    }
+
+    let auth_cutoff = now_unix().saturating_sub(secure_chat_core::RELAY_AUTH_MAX_SKEW_SECS) as i64;
+    let mut auth_nonces = conn.prepare(
+        "SELECT device_id, nonce, issued_unix FROM auth_nonces WHERE issued_unix >= ?1 ORDER BY issued_unix ASC",
+    )?;
+    let rows = auth_nonces.query_map(params![auth_cutoff], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Vec<u8>>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (device_id, nonce, issued_unix) = row?;
+        let Ok(nonce) = nonce.try_into() else {
+            continue;
+        };
+        state
+            .auth_nonces
+            .entry(parse_uuid(&device_id)?)
+            .or_default()
+            .push_back(AuthNonceRecord {
+                issued_unix: issued_unix as u64,
+                nonce,
+            });
     }
 
     Ok(state)
@@ -1760,6 +1853,56 @@ fn persist_peer_link(
             pair.right.to_string(),
             now_unix() as i64
         ],
+    )?;
+    Ok(())
+}
+
+fn persist_auth_nonce(
+    db_path: Option<&Path>,
+    device_id: DeviceId,
+    record: &AuthNonceRecord,
+) -> rusqlite::Result<()> {
+    let Some(path) = db_path else {
+        return Ok(());
+    };
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "INSERT INTO auth_nonces(device_id, nonce, issued_unix)
+         VALUES (?1, ?2, ?3)",
+        params![
+            device_id.to_string(),
+            record.nonce.as_slice(),
+            record.issued_unix as i64
+        ],
+    )?;
+    Ok(())
+}
+
+fn delete_auth_nonce(
+    db_path: Option<&Path>,
+    device_id: DeviceId,
+    nonce: &[u8; 16],
+) -> rusqlite::Result<()> {
+    let Some(path) = db_path else {
+        return Ok(());
+    };
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "DELETE FROM auth_nonces WHERE device_id = ?1 AND nonce = ?2",
+        params![device_id.to_string(), nonce.as_slice()],
+    )?;
+    Ok(())
+}
+
+fn prune_expired_auth_nonces(db_path: Option<&Path>, now: u64) -> rusqlite::Result<()> {
+    let Some(path) = db_path else {
+        return Ok(());
+    };
+    let cutoff = now.saturating_sub(secure_chat_core::RELAY_AUTH_MAX_SKEW_SECS);
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "DELETE FROM auth_nonces WHERE issued_unix < ?1",
+        params![cutoff as i64],
     )?;
     Ok(())
 }
@@ -2236,6 +2379,58 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn persistent_relay_rejects_replayed_auth_after_restart() {
+        let keys = DeviceKeyMaterial::generate(1);
+        let db_path =
+            std::env::temp_dir().join(format!("secure-chat-replay-{}.sqlite3", Uuid::new_v4()));
+        let state = AppState::persistent(&db_path).unwrap();
+        register_device_inner(&state, signed_register(&keys))
+            .await
+            .unwrap();
+
+        let drain = signed_drain(&keys, "drain_messages");
+        drain_messages_inner(&state, drain.clone()).await.unwrap();
+        let restarted = AppState::persistent(&db_path).unwrap();
+        assert_eq!(
+            drain_messages_inner(&restarted, drain).await.unwrap_err(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn mls_key_package_claim_requires_peer_link() {
+        let alice = DeviceKeyMaterial::generate(1);
+        let bob = DeviceKeyMaterial::generate(1);
+        let state = AppState::memory();
+        register_device_inner(&state, signed_register(&alice))
+            .await
+            .unwrap();
+        register_device_inner(&state, signed_register(&bob))
+            .await
+            .unwrap();
+        publish_mls_key_package_inner(&state, signed_publish_mls(&bob, b"key-package".to_vec()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            claim_mls_key_package_inner(&state, signed_claim_mls(&alice, &bob))
+                .await
+                .unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
+
+        send_message_inner(&state, signed_send(&alice, &bob, b"hello".to_vec()))
+            .await
+            .unwrap();
+        let response = claim_mls_key_package_inner(&state, signed_claim_mls(&alice, &bob))
+            .await
+            .unwrap();
+        assert_eq!(response.key_package, Some(b"key-package".to_vec()));
+    }
+
     fn signed_register(keys: &DeviceKeyMaterial) -> RegisterRequest {
         let mut request = RegisterRequest {
             bundle: keys.pre_key_bundle(),
@@ -2245,6 +2440,51 @@ mod tests {
             secure_chat_core::sign_relay_auth_for_request(
                 keys,
                 "register_device",
+                &request,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        request
+    }
+
+    fn signed_publish_mls(
+        keys: &DeviceKeyMaterial,
+        key_package: Vec<u8>,
+    ) -> PublishMlsKeyPackageRequest {
+        let mut request = PublishMlsKeyPackageRequest {
+            account_id: keys.account_id,
+            device_id: keys.device_id,
+            key_package,
+            auth: None,
+        };
+        request.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                keys,
+                "publish_mls_key_package",
+                &request,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        request
+    }
+
+    fn signed_claim_mls(
+        requester: &DeviceKeyMaterial,
+        target: &DeviceKeyMaterial,
+    ) -> ClaimMlsKeyPackageRequest {
+        let mut request = ClaimMlsKeyPackageRequest {
+            requester_account_id: requester.account_id,
+            requester_device_id: requester.device_id,
+            target_account_id: target.account_id,
+            target_device_id: target.device_id,
+            auth: None,
+        };
+        request.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                requester,
+                "claim_mls_key_package",
                 &request,
                 now_unix(),
             )

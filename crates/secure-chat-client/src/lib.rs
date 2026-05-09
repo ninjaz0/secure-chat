@@ -684,8 +684,12 @@ impl SecureChatDevice {
         self.keys.device_id
     }
 
-    pub fn invite(&self, relay_hint: Option<String>, expires_unix: Option<u64>) -> Invite {
-        Invite::new(self.keys.pre_key_bundle(), relay_hint, expires_unix)
+    pub fn invite(
+        &self,
+        relay_hint: Option<String>,
+        expires_unix: Option<u64>,
+    ) -> Result<Invite, ClientError> {
+        Invite::new(&self.keys, relay_hint, expires_unix).map_err(ClientError::from)
     }
 
     pub async fn register(&self) -> Result<RegisterResponse, ClientError> {
@@ -1374,7 +1378,7 @@ pub async fn run_relay_smoke_against(relay_url: &str) -> Result<RelaySmokeReport
     alice.register().await?;
     bob.register().await?;
 
-    let bob_invite = bob.invite(Some(relay_url.to_string()), None);
+    let bob_invite = bob.invite(Some(relay_url.to_string()), None)?;
     let bob_invite_uri = bob_invite.to_uri()?;
     alice
         .send_to_invite(&bob_invite, "hello from Alice via relay")
@@ -1424,6 +1428,23 @@ pub async fn run_group_smoke_against(relay_url: &str) -> Result<GroupSmokeReport
         .register_apns_token(&bob, "00deadbeef", ApnsPlatform::Ios)
         .await?
         .registered;
+    relay
+        .send(
+            &alice,
+            SendRequest {
+                sender_account_id: Some(alice.account_id),
+                sender_device_id: Some(alice.device_id),
+                to_account_id: bob.account_id,
+                to_device_id: bob.device_id,
+                transport_kind: TransportKind::RelayHttps,
+                sealed_sender: None,
+                ciphertext: b"mls-key-package-claim-authorization".to_vec(),
+                expires_unix: Some(now_unix() + 60),
+                auth: None,
+            },
+        )
+        .await?;
+    let _ = relay.drain(&bob).await?;
     relay
         .publish_mls_key_package(&bob, b"mock-openmls-key-package".to_vec())
         .await?;
@@ -1604,7 +1625,7 @@ mod tests {
         alice.register().await.unwrap();
         bob.register().await.unwrap();
 
-        let bob_invite = bob.invite(Some(format!("http://{addr}")), None);
+        let bob_invite = bob.invite(Some(format!("http://{addr}")), None).unwrap();
         alice
             .send_to_invite(&bob_invite, "hello through relay")
             .await

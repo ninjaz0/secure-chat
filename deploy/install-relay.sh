@@ -110,6 +110,19 @@ section() {
   printf '\n== %s ==\n' "$1"
 }
 
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+    return
+  fi
+  printf 'No SHA-256 tool found. Install sha256sum or shasum.\n' >&2
+  return 1
+}
+
 is_tcp_port() {
   local port="$1"
   [[ "$port" =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535))
@@ -357,7 +370,35 @@ ensure_rust() {
 
 build_relay() {
   section "Building release relay"
-  PATH="$HOME/.cargo/bin:$PATH" cargo build --manifest-path "$REPO_DIR/Cargo.toml" --release -p secure-chat-relay
+  PATH="$HOME/.cargo/bin:$PATH" cargo build --manifest-path "$REPO_DIR/Cargo.toml" --locked --release -p secure-chat-relay
+}
+
+write_build_info() {
+  local binary="$REPO_DIR/target/release/secure-chat-relay"
+  local lock_hash="missing"
+  local git_revision="unknown"
+  local tmp_info
+
+  if [[ -f "$REPO_DIR/Cargo.lock" ]]; then
+    lock_hash="$(sha256_file "$REPO_DIR/Cargo.lock")"
+  fi
+  if command -v git >/dev/null 2>&1 && [[ -d "$REPO_DIR/.git" ]]; then
+    git_revision="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+  fi
+
+  tmp_info="$(mktemp)"
+  {
+    printf 'installed_at_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'repo_dir=%s\n' "$REPO_DIR"
+    printf 'git_revision=%s\n' "$git_revision"
+    printf 'cargo_lock_sha256=%s\n' "$lock_hash"
+    printf 'binary_sha256=%s\n' "$(sha256_file "$binary")"
+    printf 'cargo_version=%s\n' "$(PATH="$HOME/.cargo/bin:$PATH" cargo --version)"
+    printf 'rustc_version=%s\n' "$(PATH="$HOME/.cargo/bin:$PATH" rustc --version)"
+    printf 'cargo_build_args=--locked --release -p secure-chat-relay\n'
+  } >"$tmp_info"
+  need_sudo install -m 0644 "$tmp_info" "$CONFIG_DIR/build-info.txt"
+  rm -f "$tmp_info"
 }
 
 install_files() {
@@ -370,6 +411,7 @@ install_files() {
   need_sudo install -m 0644 "$REPO_DIR/deploy/secure-chat-relay.service" "/etc/systemd/system/$SERVICE.service"
   need_sudo install -m 0755 "$REPO_DIR/deploy/copy-letsencrypt-certs.sh" "$INSTALL_DIR/copy-letsencrypt-certs.sh"
   need_sudo install -m 0755 "$REPO_DIR/deploy/chatrelay-manager.sh" "$MANAGER_PATH"
+  write_build_info
 }
 
 issue_certificate() {

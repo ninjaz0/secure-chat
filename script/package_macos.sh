@@ -5,6 +5,8 @@ APP_NAME="SecureChatMac"
 BUNDLE_ID="dev.local.securechat.mac"
 VERSION="${SECURE_CHAT_VERSION:-0.2.4}"
 MIN_SYSTEM_VERSION="14.0"
+SIGN_IDENTITY="${SECURE_CHAT_MACOS_SIGN_IDENTITY:--}"
+RELEASE_STRICT="${SECURE_CHAT_RELEASE_STRICT:-0}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SWIFT_PACKAGE="$ROOT_DIR/apps/macos/SecureChatMac"
@@ -75,10 +77,18 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
-codesign --force --sign - "$APP_FRAMEWORKS/libsecure_chat_ffi.dylib"
-codesign --force --sign - "$APP_BINARY"
-codesign --force --sign - "$APP_BUNDLE"
+codesign --force --sign "$SIGN_IDENTITY" "$APP_FRAMEWORKS/libsecure_chat_ffi.dylib"
+codesign --force --sign "$SIGN_IDENTITY" "$APP_BINARY"
+codesign --force --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
 codesign --verify --deep --strict "$APP_BUNDLE"
+
+if [[ "$RELEASE_STRICT" == "1" ]]; then
+  if [[ "$SIGN_IDENTITY" == "-" ]]; then
+    echo "SECURE_CHAT_RELEASE_STRICT=1 requires a Developer ID signing identity." >&2
+    exit 1
+  fi
+  spctl --assess --type execute --verbose=4 "$APP_BUNDLE"
+fi
 
 cp -R "$APP_BUNDLE" "$DMG_STAGING/"
 ln -s /Applications "$DMG_STAGING/Applications"

@@ -5,6 +5,17 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+val releaseKeystorePath = System.getenv("SECURE_CHAT_ANDROID_KEYSTORE")
+val releaseKeystorePassword = System.getenv("SECURE_CHAT_ANDROID_KEYSTORE_PASSWORD")
+val releaseKeyAlias = System.getenv("SECURE_CHAT_ANDROID_KEY_ALIAS")
+val releaseKeyPassword = System.getenv("SECURE_CHAT_ANDROID_KEY_PASSWORD")
+val hasReleaseSigning = listOf(
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "dev.securechat.android"
     compileSdk = 35
@@ -18,9 +29,30 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("release") {
+            if (hasReleaseSigning) {
+                storeFile = file(releaseKeystorePath!!)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

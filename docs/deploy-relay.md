@@ -27,7 +27,10 @@ For a fresh Ubuntu server, the recommended path is the installer script. It
 installs packages, installs Rust when needed, builds the relay, creates the
 `securechat` service user, issues a Let's Encrypt certificate, writes the
 systemd/env files, opens firewall ports, installs a renewal hook, and installs
-the server management command:
+the server management command. Relay builds use `cargo --locked`; each install
+or `chatrelay update` also records the git revision, `Cargo.lock` SHA-256,
+binary SHA-256, and Rust toolchain versions in
+`/etc/secure-chat/build-info.txt`:
 
 ```bash
 git clone https://github.com/ninjaz0/secure-chat.git

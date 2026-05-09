@@ -68,6 +68,48 @@ print_header() {
   printf '\n== %s ==\n' "$1"
 }
 
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+    return
+  fi
+  printf 'No SHA-256 tool found. Install sha256sum or shasum.\n' >&2
+  return 1
+}
+
+write_build_info() {
+  local repo="$1"
+  local binary="$repo/target/release/secure-chat-relay"
+  local lock_hash="missing"
+  local git_revision="unknown"
+  local tmp_info
+
+  if [[ -f "$repo/Cargo.lock" ]]; then
+    lock_hash="$(sha256_file "$repo/Cargo.lock")"
+  fi
+  if command -v git >/dev/null 2>&1 && [[ -d "$repo/.git" ]]; then
+    git_revision="$(git -C "$repo" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+  fi
+
+  tmp_info="$(mktemp)"
+  {
+    printf 'installed_at_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'repo_dir=%s\n' "$repo"
+    printf 'git_revision=%s\n' "$git_revision"
+    printf 'cargo_lock_sha256=%s\n' "$lock_hash"
+    printf 'binary_sha256=%s\n' "$(sha256_file "$binary")"
+    printf 'cargo_version=%s\n' "$(PATH="$HOME/.cargo/bin:$PATH" cargo --version)"
+    printf 'rustc_version=%s\n' "$(PATH="$HOME/.cargo/bin:$PATH" rustc --version)"
+    printf 'cargo_build_args=--locked --release -p secure-chat-relay\n'
+  } >"$tmp_info"
+  need_sudo install -m 0644 "$tmp_info" "$CONFIG_DIR/build-info.txt"
+  rm -f "$tmp_info"
+}
+
 service_status() {
   need_sudo systemctl status "$SERVICE" --no-pager
 }
@@ -179,10 +221,11 @@ update_relay() {
   fi
 
   print_header "Building relay"
-  PATH="$HOME/.cargo/bin:$PATH" cargo build --manifest-path "$repo/Cargo.toml" --release -p secure-chat-relay
+  PATH="$HOME/.cargo/bin:$PATH" cargo build --manifest-path "$repo/Cargo.toml" --locked --release -p secure-chat-relay
 
   print_header "Installing binary"
   need_sudo install -m 0755 "$repo/target/release/secure-chat-relay" "$BIN_PATH"
+  write_build_info "$repo"
   service_restart
 }
 

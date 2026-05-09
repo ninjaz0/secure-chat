@@ -606,10 +606,11 @@ mod tests {
     fn invite_uri_round_trip_verifies_bundle() {
         let alice = DeviceKeyMaterial::generate(1);
         let invite = Invite::new(
-            alice.pre_key_bundle(),
+            &alice,
             Some("https://relay.local".to_string()),
             Some(1_900_000_000),
-        );
+        )
+        .unwrap();
         let uri = invite.to_uri().unwrap();
         let decoded = Invite::from_uri(&uri).unwrap();
         decoded.verify().unwrap();
@@ -620,10 +621,11 @@ mod tests {
     fn temporary_invite_round_trip_preserves_ephemeral_mode() {
         let alice = DeviceKeyMaterial::generate(1);
         let invite = Invite::temporary(
-            alice.pre_key_bundle(),
+            &alice,
             Some("https://relay.local".to_string()),
             Some(1_900_000_000),
-        );
+        )
+        .unwrap();
         let uri = invite.to_uri().unwrap();
         let decoded = Invite::from_uri(&uri).unwrap();
         decoded.verify().unwrap();
@@ -635,9 +637,40 @@ mod tests {
     #[test]
     fn invite_rejects_account_identity_mismatch() {
         let alice = DeviceKeyMaterial::generate(1);
-        let mut invite = Invite::new(alice.pre_key_bundle(), None, None);
+        let mut invite = Invite::new(&alice, None, None).unwrap();
         invite.account_id = Uuid::new_v4();
         assert!(matches!(invite.verify(), Err(CryptoError::InvalidInput)));
+    }
+
+    #[test]
+    fn invite_rejects_tampered_metadata() {
+        let alice = DeviceKeyMaterial::generate(1);
+        let mut invite = Invite::temporary(
+            &alice,
+            Some("https://relay.local".to_string()),
+            Some(1_900_000_000),
+        )
+        .unwrap();
+        invite.mode = InviteMode::Permanent;
+        assert!(matches!(invite.verify(), Err(CryptoError::BadSignature)));
+
+        let mut invite = Invite::temporary(
+            &alice,
+            Some("https://relay.local".to_string()),
+            Some(1_900_000_000),
+        )
+        .unwrap();
+        invite.expires_unix = Some(2_000_000_000);
+        assert!(matches!(invite.verify(), Err(CryptoError::BadSignature)));
+
+        let mut invite = Invite::temporary(
+            &alice,
+            Some("https://relay.local".to_string()),
+            Some(1_900_000_000),
+        )
+        .unwrap();
+        invite.relay_hint = Some("https://evil.example".to_string());
+        assert!(matches!(invite.verify(), Err(CryptoError::BadSignature)));
     }
 
     #[test]

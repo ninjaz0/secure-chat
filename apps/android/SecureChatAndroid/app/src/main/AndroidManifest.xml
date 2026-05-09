@@ -3,7 +3,10 @@
 
     <application
         android:allowBackup="false"
-        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@drawable/ic_secure_chat"
+        android:roundIcon="@drawable/ic_secure_chat"
         android:label="SecureChat"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">

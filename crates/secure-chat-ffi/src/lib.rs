@@ -1055,11 +1055,11 @@ fn try_build_demo_state() -> Result<DemoState, String> {
     let mut bob = DeviceKeyMaterial::generate(8);
     let bob_bundle = bob.pre_key_bundle();
     let alice_invite = Invite::new(
-        alice.pre_key_bundle(),
+        &alice,
         Some("https://relay.local/v1".to_string()),
         Some(1_900_000_000),
     )
-    .to_uri()
+    .and_then(|invite| invite.to_uri())
     .map_err(|err| err.to_string())?;
     let (initial, mut alice_session) =
         start_session_as_initiator(&alice, &bob_bundle, CipherSuite::ChaCha20Poly1305)
