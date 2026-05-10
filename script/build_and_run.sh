@@ -45,6 +45,9 @@ fi
 chmod +x "$APP_BINARY"
 install_name_tool -id "@rpath/libsecure_chat_ffi.dylib" "$APP_FRAMEWORKS/libsecure_chat_ffi.dylib" 2>/dev/null || true
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BINARY" 2>/dev/null || true
+while IFS= read -r linked_dylib; do
+  install_name_tool -change "$linked_dylib" "@rpath/libsecure_chat_ffi.dylib" "$APP_BINARY" 2>/dev/null || true
+done < <(otool -L "$APP_BINARY" | sed -n 's/^[[:space:]]*\(.*libsecure_chat_ffi\.dylib\) (compatibility version.*$/\1/p')
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
