@@ -20,7 +20,7 @@
     <AppxPackageSigningTimestampDigestAlgorithm>SHA256</AppxPackageSigningTimestampDigestAlgorithm>
     <PackageCertificateKeyFile Condition="'$(PackageCertificateKeyFile)' == ''">SecureChatWindows_TemporaryKey.pfx</PackageCertificateKeyFile>
     <PackageCertificatePassword Condition="'$(PackageCertificatePassword)' == ''"></PackageCertificatePassword>
-    <PackageVersion Condition="'$(PackageVersion)' == ''">0.2.6.0</PackageVersion>
+    <PackageVersion Condition="'$(PackageVersion)' == ''">0.2.7.0</PackageVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>

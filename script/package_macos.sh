@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_NAME="SecureChatMac"
 BUNDLE_ID="dev.local.securechat.mac"
-VERSION="${SECURE_CHAT_VERSION:-0.2.6}"
+VERSION="${SECURE_CHAT_VERSION:-0.2.7}"
 MIN_SYSTEM_VERSION="14.0"
 SIGN_IDENTITY="${SECURE_CHAT_MACOS_SIGN_IDENTITY:--}"
 RELEASE_STRICT="${SECURE_CHAT_RELEASE_STRICT:-0}"
@@ -71,7 +71,7 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundleShortVersionString</key>
   <string>$VERSION</string>
   <key>CFBundleVersion</key>
-  <string>7</string>
+  <string>9</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSPrincipalClass</key>

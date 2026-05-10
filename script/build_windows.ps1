@@ -1,8 +1,8 @@
 param(
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
-    [string]$Version = "0.2.6.0",
-    [string]$ArtifactVersion = "0.2.6",
+    [string]$Version = "0.2.7.0",
+    [string]$ArtifactVersion = "0.2.7",
     [string]$RuntimeIdentifier = "win-x64",
     [switch]$SkipRust,
     [switch]$SkipPackage

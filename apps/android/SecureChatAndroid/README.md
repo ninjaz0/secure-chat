@@ -38,6 +38,6 @@ The app stores Rust runtime secrets in Android app-private no-backup storage and
 excludes the app-private files, databases, shared preferences, and external
 state from Android cloud backup and device-transfer extraction rules.
 
-The public v0.2.6 release asset is named `SecureChatAndroid-0.2.6.apk`. It is a
+The public v0.2.7 release asset is named `SecureChatAndroid-0.2.7.apk`. It is a
 normal installable APK; the project still requires a real release keystore for
 official store-style distribution.

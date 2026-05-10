@@ -4,7 +4,7 @@
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   IgnorableNamespaces="uap">
 
-  <Identity Name="SecureChat.Windows" Publisher="CN=SecureChat Local Release, O=SecureChat" Version="0.2.6.0" />
+  <Identity Name="SecureChat.Windows" Publisher="CN=SecureChat Local Release, O=SecureChat" Version="0.2.7.0" />
   <Properties>
     <DisplayName>SecureChat</DisplayName>
     <PublisherDisplayName>SecureChat</PublisherDisplayName>

@@ -1,6 +1,6 @@
 # SecureChat Windows 客户端说明
 
-Windows 客户端从 v0.2.6 开始加入，目标是与 macOS、iOS、Android 的 v0.2.6
+Windows 客户端从 v0.2.6 开始加入；当前源码按 v0.2.7 与 macOS、iOS、Android
 聊天能力对齐。它使用 WinUI 3、Windows App SDK、C# P/Invoke 和
 `secure_chat_ffi.dll`，协议、加密、附件分片、阅后即焚和本地数据库逻辑仍由 Rust
 runtime 处理。
@@ -27,7 +27,7 @@ runtime 处理。
 3. 把 DLL 复制到 `apps/windows/SecureChatWindows/Native`。
 4. 生成或复用本地测试签名证书。
 5. 构建 WinUI 3 app 并生成签名 MSIX。
-6. 复制 `dist/SecureChatWindows-0.2.6.msix` 并写出 SHA-256。
+6. 复制 `dist/SecureChatWindows-0.2.7.msix` 并写出 SHA-256。
 
 正式公开分发时，请用可信代码签名证书替换测试证书，并在 Release notes 中公布
 证书指纹和 SHA-256。
@@ -68,7 +68,7 @@ Windows 端支持：
 3. 选择 `Current User`。
 4. 选择 `Place all certificates in the following store`。
 5. 选择 `Trusted People`。
-6. 完成后双击 `dist/SecureChatWindows-0.2.6.msix` 安装。
+6. 完成后双击 `dist/SecureChatWindows-0.2.7.msix` 安装。
 
 测试证书只适合本地或内部分发。正式发布必须使用可信代码签名证书。
 

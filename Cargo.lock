@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "secure-chat-client"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "quinn",
  "reqwest",
@@ -1780,7 +1780,7 @@ dependencies = [
 
 [[package]]
 name = "secure-chat-core"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -1801,7 +1801,7 @@ dependencies = [
 
 [[package]]
 name = "secure-chat-desktop"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "base64",
  "keyring",
@@ -1819,7 +1819,7 @@ dependencies = [
 
 [[package]]
 name = "secure-chat-ffi"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "jni",
  "secure-chat-client",
@@ -1832,7 +1832,7 @@ dependencies = [
 
 [[package]]
 name = "secure-chat-relay"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "axum",
  "axum-server",
