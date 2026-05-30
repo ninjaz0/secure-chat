@@ -2,7 +2,9 @@ use crate::crypto::{
     decrypt_aead, encrypt_aead, hkdf_expand, random_bytes, serde_bytes, CipherSuite, CryptoError,
     Key32, Nonce12,
 };
-use crate::identity::{AccountId, DeviceId, PublicDeviceIdentity};
+use crate::identity::{
+    sign_bytes, verify_signature, AccountId, DeviceId, DeviceKeyMaterial, PublicDeviceIdentity,
+};
 use openmls::prelude::Ciphersuite;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -52,6 +54,8 @@ pub struct GroupWireMessage {
     pub sender_device_id: DeviceId,
     pub nonce: Nonce12,
     pub ciphertext: Vec<u8>,
+    #[serde(with = "serde_big_array::BigArray")]
+    pub sender_signature: [u8; 64],
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -149,14 +153,11 @@ impl GroupState {
 
     pub fn encrypt_message(
         &self,
-        sender: &PublicDeviceIdentity,
+        sender_keys: &DeviceKeyMaterial,
         plain: GroupPlainMessage,
     ) -> Result<GroupWireMessage, CryptoError> {
-        if !self
-            .members
-            .iter()
-            .any(|member| member.identity.device_id == sender.device_id)
-        {
+        let sender = sender_keys.public_identity();
+        if !self.members.iter().any(|member| member.identity == sender) {
             return Err(CryptoError::InvalidInput);
         }
         let nonce = random_bytes::<12>();
@@ -173,6 +174,17 @@ impl GroupState {
             &serde_bytes(&plain)?,
             &ad,
         )?;
+        let sender_signature = sign_bytes(
+            &sender_keys.device_signing_key(),
+            &group_signature_payload(
+                self.group_id,
+                self.epoch,
+                sender.account_id,
+                sender.device_id,
+                &nonce,
+                &ciphertext,
+            ),
+        );
         Ok(GroupWireMessage {
             protocol: group_protocol_label(),
             mls_ciphersuite: openmls_ciphersuite_label(),
@@ -182,6 +194,7 @@ impl GroupState {
             sender_device_id: sender.device_id,
             nonce,
             ciphertext,
+            sender_signature,
         })
     }
 
@@ -192,13 +205,29 @@ impl GroupState {
         if wire.protocol != group_protocol_label()
             || wire.group_id != self.group_id
             || wire.epoch != self.epoch
-            || !self
-                .members
-                .iter()
-                .any(|member| member.identity.device_id == wire.sender_device_id)
         {
             return Err(CryptoError::InvalidInput);
         }
+        let sender = self
+            .members
+            .iter()
+            .find(|member| {
+                member.identity.account_id == wire.sender_account_id
+                    && member.identity.device_id == wire.sender_device_id
+            })
+            .ok_or(CryptoError::InvalidInput)?;
+        verify_signature(
+            &sender.identity.device_signing_public,
+            &group_signature_payload(
+                wire.group_id,
+                wire.epoch,
+                wire.sender_account_id,
+                wire.sender_device_id,
+                &wire.nonce,
+                &wire.ciphertext,
+            ),
+            &wire.sender_signature,
+        )?;
         let ad = group_associated_data(
             wire.group_id,
             wire.epoch,
@@ -295,6 +324,26 @@ fn group_associated_data(
     .concat()
 }
 
+fn group_signature_payload(
+    group_id: Uuid,
+    epoch: u64,
+    sender_account_id: AccountId,
+    sender_device_id: DeviceId,
+    nonce: &Nonce12,
+    ciphertext: &[u8],
+) -> Vec<u8> {
+    [
+        b"secure-chat-v0.2/group-message-sender-signature".as_slice(),
+        group_id.as_bytes().as_slice(),
+        &epoch.to_be_bytes(),
+        sender_account_id.as_bytes(),
+        sender_device_id.as_bytes(),
+        nonce.as_slice(),
+        ciphertext,
+    ]
+    .concat()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,7 +362,7 @@ mod tests {
 
         let wire = group
             .encrypt_message(
-                &alice.public_identity(),
+                &alice,
                 GroupPlainMessage {
                     sent_at_unix: 1,
                     body: "hi group".to_string(),
@@ -327,7 +376,7 @@ mod tests {
         group.remove_member(bob.device_id).unwrap();
         let wire = group
             .encrypt_message(
-                &alice.public_identity(),
+                &alice,
                 GroupPlainMessage {
                     sent_at_unix: 2,
                     body: "after remove".to_string(),
@@ -335,5 +384,62 @@ mod tests {
             )
             .unwrap();
         assert!(stale_bob_group.decrypt_message(&wire).is_err());
+    }
+
+    #[test]
+    fn group_member_cannot_impersonate_another_member() {
+        let alice = DeviceKeyMaterial::generate(16);
+        let bob = DeviceKeyMaterial::generate(16);
+        let carol = DeviceKeyMaterial::generate(16);
+        let mut group = GroupState::create("Weekend", "Alice", alice.public_identity()).unwrap();
+        group.add_member("Bob", bob.public_identity()).unwrap();
+        group.add_member("Carol", carol.public_identity()).unwrap();
+        let bob_group = GroupState::from_welcome(group.welcome()).unwrap();
+        let carol_group = GroupState::from_welcome(group.welcome()).unwrap();
+
+        let claimed_sender = alice.public_identity();
+        let nonce = random_bytes::<12>();
+        let plain = GroupPlainMessage {
+            sent_at_unix: 3,
+            body: "forged by Bob".to_string(),
+        };
+        let ad = group_associated_data(
+            bob_group.group_id,
+            bob_group.epoch,
+            claimed_sender.account_id,
+            claimed_sender.device_id,
+        );
+        let ciphertext = encrypt_aead(
+            CipherSuite::default(),
+            &bob_group.secret,
+            &nonce,
+            &serde_bytes(&plain).unwrap(),
+            &ad,
+        )
+        .unwrap();
+        let attacker_signature = sign_bytes(
+            &bob.device_signing_key(),
+            &group_signature_payload(
+                bob_group.group_id,
+                bob_group.epoch,
+                claimed_sender.account_id,
+                claimed_sender.device_id,
+                &nonce,
+                &ciphertext,
+            ),
+        );
+        let forged_wire = GroupWireMessage {
+            protocol: group_protocol_label(),
+            mls_ciphersuite: openmls_ciphersuite_label(),
+            group_id: bob_group.group_id,
+            epoch: bob_group.epoch,
+            sender_account_id: claimed_sender.account_id,
+            sender_device_id: claimed_sender.device_id,
+            nonce,
+            ciphertext,
+            sender_signature: attacker_signature,
+        };
+
+        assert!(carol_group.decrypt_message(&forged_wire).is_err());
     }
 }

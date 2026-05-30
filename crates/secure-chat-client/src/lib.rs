@@ -1459,7 +1459,7 @@ pub async fn run_group_smoke_against(relay_url: &str) -> Result<GroupSmokeReport
     let bob_group = GroupState::from_welcome(group.welcome())?;
     let carol_group = GroupState::from_welcome(group.welcome())?;
     let wire = group.encrypt_message(
-        &alice.public_identity(),
+        &alice,
         GroupPlainMessage {
             sent_at_unix: now_unix(),
             body: "hello MLS group".to_string(),
