@@ -2452,6 +2452,7 @@ impl DesktopRuntime {
             .attachment_id
             .as_deref()
             .ok_or_else(|| DesktopError::InvalidData("missing attachment id".to_string()))?;
+        validate_attachment_id(attachment_id)?;
         let chunk_index = content
             .chunk_index
             .ok_or_else(|| DesktopError::InvalidData("missing chunk index".to_string()))?;
@@ -2498,6 +2499,7 @@ impl DesktopRuntime {
             .attachment_id
             .as_deref()
             .ok_or_else(|| DesktopError::InvalidData("missing attachment id".to_string()))?;
+        validate_attachment_id(attachment_id)?;
         if self.conn.query_row(
             "SELECT COUNT(*) FROM attachments WHERE id = ?1",
             params![attachment_id],
@@ -2541,7 +2543,9 @@ impl DesktopRuntime {
             "DELETE FROM attachment_chunks WHERE attachment_id = ?1",
             params![attachment_id],
         )?;
-        let _ = fs::remove_dir_all(self.incoming_chunks_dir_path(attachment_id));
+        if let Ok(chunk_dir) = self.incoming_chunks_dir_path(attachment_id) {
+            let _ = fs::remove_dir_all(chunk_dir);
+        }
         Ok(Some(AttachmentView {
             id: attachment_id.to_string(),
             kind: normalize_attachment_kind(content.kind.as_str()).to_string(),
@@ -2787,6 +2791,7 @@ impl DesktopRuntime {
         attachment_id: &str,
         file_name: &str,
     ) -> Result<PathBuf, DesktopError> {
+        validate_attachment_id(attachment_id)?;
         let dir = self.attachments_dir().join(attachment_id);
         fs::create_dir_all(&dir)?;
         Ok(dir.join(sanitize_file_name(file_name)))
@@ -2803,13 +2808,14 @@ impl DesktopRuntime {
     }
 
     fn incoming_chunks_dir(&self, attachment_id: &str) -> Result<PathBuf, DesktopError> {
-        let dir = self.incoming_chunks_dir_path(attachment_id);
+        let dir = self.incoming_chunks_dir_path(attachment_id)?;
         fs::create_dir_all(&dir)?;
         Ok(dir)
     }
 
-    fn incoming_chunks_dir_path(&self, attachment_id: &str) -> PathBuf {
-        self.data_dir.join("attachment-chunks").join(attachment_id)
+    fn incoming_chunks_dir_path(&self, attachment_id: &str) -> Result<PathBuf, DesktopError> {
+        validate_attachment_id(attachment_id)?;
+        Ok(self.data_dir.join("attachment-chunks").join(attachment_id))
     }
 
     fn attachments_dir(&self) -> PathBuf {
@@ -3127,6 +3133,17 @@ fn message_display_text(content: &MessageContentView) -> String {
     }
 }
 
+fn validate_attachment_id(attachment_id: &str) -> Result<(), DesktopError> {
+    let parsed = Uuid::parse_str(attachment_id)
+        .map_err(|_| DesktopError::InvalidData("invalid attachment id".to_string()))?;
+    if parsed.to_string() != attachment_id {
+        return Err(DesktopError::InvalidData(
+            "invalid attachment id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn normalize_attachment_kind(kind: &str) -> &'static str {
     match kind {
         "image" => "image",
@@ -3338,6 +3355,86 @@ mod tests {
 
     fn test_data_dir(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("secure-chat-{label}-{}", Uuid::new_v4()))
+    }
+
+    fn attachment_chunk_content(attachment_id: &str) -> WireContent {
+        WireContent {
+            kind: "file".to_string(),
+            text: None,
+            burn_id: None,
+            destroyed: None,
+            target_burn_id: None,
+            attachment: None,
+            attachment_id: Some(attachment_id.to_string()),
+            file_name: Some("note.txt".to_string()),
+            mime_type: Some("text/plain".to_string()),
+            size_bytes: Some(6),
+            sha256: None,
+            chunk_index: Some(0),
+            total_chunks: Some(2),
+            data_base64: Some(STANDARD.encode(b"secret")),
+        }
+    }
+
+    #[test]
+    fn incoming_attachment_ids_must_be_uuids() {
+        let data_dir = test_data_dir("attachment-id-validation");
+        let runtime = DesktopRuntime::open(&data_dir).unwrap();
+        let escaped_dir = test_data_dir("attachment-id-escape");
+        let escaped_chunk = escaped_dir.join("00000000.chunk");
+
+        for malicious_id in [
+            escaped_dir.to_str().unwrap().to_string(),
+            "../outside-attachment".to_string(),
+        ] {
+            let err = runtime
+                .store_attachment_chunk(
+                    ThreadKind::Contact,
+                    "thread-1",
+                    &attachment_chunk_content(&malicious_id),
+                )
+                .expect_err("malicious attachment id should be rejected");
+            assert!(
+                matches!(err, DesktopError::InvalidData(message) if message == "invalid attachment id")
+            );
+        }
+
+        assert!(!escaped_chunk.exists());
+        assert!(!data_dir.join("outside-attachment").exists());
+
+        let _ = fs::remove_dir_all(data_dir);
+        let _ = fs::remove_dir_all(escaped_dir);
+    }
+
+    #[test]
+    fn valid_attachment_ids_are_stored_under_app_directories() {
+        let data_dir = test_data_dir("attachment-id-valid");
+        let runtime = DesktopRuntime::open(&data_dir).unwrap();
+        let attachment_id = Uuid::new_v4().to_string();
+        let content = attachment_chunk_content(&attachment_id);
+
+        runtime
+            .store_attachment_chunk(ThreadKind::Contact, "thread-1", &content)
+            .unwrap();
+
+        let chunk_path = data_dir
+            .join("attachment-chunks")
+            .join(&attachment_id)
+            .join("00000000.chunk");
+        assert_eq!(fs::read(chunk_path).unwrap(), b"secret");
+
+        let final_path = runtime
+            .attachment_file_path(&attachment_id, "../note.txt")
+            .unwrap();
+        assert_eq!(
+            final_path,
+            data_dir
+                .join("attachments")
+                .join(&attachment_id)
+                .join("_note.txt")
+        );
+
+        let _ = fs::remove_dir_all(data_dir);
     }
 
     #[tokio::test]
