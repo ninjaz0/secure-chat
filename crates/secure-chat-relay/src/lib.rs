@@ -510,32 +510,33 @@ async fn register_device_inner(
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     let account_id = request.bundle.identity.account_id;
     let device_id = request.bundle.identity.device_id;
-    {
-        let mut inner = state.inner.write().await;
-        let mut signed_request = request.clone();
-        signed_request.auth = None;
-        verify_relay_auth(
-            state.db_path(),
-            &mut inner,
-            RelayAuthScope {
-                account_id,
-                device_id,
-                device_signing_public: &request.bundle.identity.device_signing_public,
-                action: "register_device",
-            },
-            &signed_request,
-            request.auth.as_ref(),
-        )?;
-        if !device_exists(&inner, account_id, device_id) {
-            enforce_registration_rate(&mut inner)?;
-        }
-        enforce_device_limits(&inner, account_id, device_id)?;
+    let mut inner = state.inner.write().await;
+    let mut signed_request = request.clone();
+    signed_request.auth = None;
+    let existing_device_public = device_signing_public(&inner, account_id, device_id);
+    let registration_signing_public = existing_device_public
+        .as_ref()
+        .unwrap_or(&request.bundle.identity.device_signing_public);
+    verify_relay_auth(
+        state.db_path(),
+        &mut inner,
+        RelayAuthScope {
+            account_id,
+            device_id,
+            device_signing_public: registration_signing_public,
+            action: "register_device",
+        },
+        &signed_request,
+        request.auth.as_ref(),
+    )?;
+    if existing_device_public.is_none() {
+        enforce_registration_rate(&mut inner)?;
     }
+    enforce_device_limits(&inner, account_id, device_id)?;
     persist_device(state.db_path(), account_id, device_id, &request.bundle).map_err(|err| {
         tracing::error!(%err, "persist device failed");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    let mut inner = state.inner.write().await;
     inner
         .devices
         .entry(account_id)
@@ -1266,14 +1267,6 @@ fn verify_relay_auth<T: serde::Serialize>(
         }
     }
     Ok(())
-}
-
-fn device_exists(inner: &RelayState, account_id: AccountId, device_id: DeviceId) -> bool {
-    inner
-        .devices
-        .get(&account_id)
-        .and_then(|devices| devices.get(&device_id))
-        .is_some()
 }
 
 fn enforce_registration_rate(inner: &mut RelayState) -> Result<(), StatusCode> {
@@ -2414,6 +2407,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relay_rejects_self_signed_reregistration_for_existing_device() {
+        let victim = DeviceKeyMaterial::generate(1);
+        let mut attacker = DeviceKeyMaterial::generate(1);
+        attacker.account_id = victim.account_id;
+        attacker.device_id = victim.device_id;
+        attacker.refresh_signatures();
+        let state = AppState::memory();
+        register_device_inner(&state, signed_register(&victim))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            register_device_inner(&state, signed_register(&attacker))
+                .await
+                .unwrap_err(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_allows_existing_device_to_rotate_registration_key() {
+        let original = DeviceKeyMaterial::generate(1);
+        let mut rotated = DeviceKeyMaterial::generate(1);
+        rotated.account_id = original.account_id;
+        rotated.device_id = original.device_id;
+        rotated.refresh_signatures();
+        let state = AppState::memory();
+        register_device_inner(&state, signed_register(&original))
+            .await
+            .unwrap();
+
+        register_device_inner(&state, signed_register_bundle(&rotated, &original))
+            .await
+            .unwrap();
+
+        let mut drain = DrainRequest {
+            account_id: rotated.account_id,
+            device_id: rotated.device_id,
+            auth: None,
+        };
+        drain.auth = Some(
+            secure_chat_core::sign_relay_auth_for_request(
+                &rotated,
+                "drain_messages",
+                &drain,
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        drain_messages_inner(&state, drain).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn persistent_relay_rejects_replayed_auth_after_restart() {
         let keys = DeviceKeyMaterial::generate(1);
         let db_path =
@@ -2466,13 +2512,20 @@ mod tests {
     }
 
     fn signed_register(keys: &DeviceKeyMaterial) -> RegisterRequest {
+        signed_register_bundle(keys, keys)
+    }
+
+    fn signed_register_bundle(
+        bundle_keys: &DeviceKeyMaterial,
+        signing_keys: &DeviceKeyMaterial,
+    ) -> RegisterRequest {
         let mut request = RegisterRequest {
-            bundle: keys.pre_key_bundle(),
+            bundle: bundle_keys.pre_key_bundle(),
             auth: None,
         };
         request.auth = Some(
             secure_chat_core::sign_relay_auth_for_request(
-                keys,
+                signing_keys,
                 "register_device",
                 &request,
                 now_unix(),
